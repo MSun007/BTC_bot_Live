@@ -1090,11 +1090,11 @@ def spot_accounts(btc_price: float) -> Dict[str, Any]:
         except Exception as e:
             result["error"] = f"raw={raw_error}; sdk={e}"
 
-    # v72 safety fix: the generic brokerage accounts endpoint can include USD/USDC
-    # balances that are also represented in the Coinbase futures balance summary.
-    # Including those cash balances here can double-count account equity and created
-    # a false Spot Treasury value. Until a dedicated spot-cash account filter is
-    # added, include only live BTC spot mark value in the combined equity view.
+    # v72 safety fix, confirmed correct in v74: the generic brokerage accounts
+    # endpoint includes USD/USDC balances that are already represented in the
+    # Coinbase futures balance summary for this account (operator-confirmed: futures
+    # base equity already includes this cash). Including it here would double-count
+    # account equity, so only live BTC spot mark value is included in combined equity.
     result["RAW_USD_USDC_DISCOVERED"] = (result.get("USD") or 0.0) + (result.get("USDC") or 0.0)
     result["USD_DISPLAY_ONLY"] = result.get("USD", 0.0)
     result["USDC_DISPLAY_ONLY"] = result.get("USDC", 0.0)
@@ -2494,17 +2494,11 @@ def api_data():
             warnings.append("Futures exchange session is closed; exchange mark/P&L fields may use settlement/stale marks.")
         if isinstance(risk_gate, dict) and risk_gate.get("entries_allowed") is False:
             warnings.append(f"Perp entries are currently blocked by risk gate: {format_operator_reason_et(risk_gate.get('reason'))}")
-        # v73 fix: spot_accounts() zeroes discovered USD/USDC on the assumption it's
-        # already reflected in futures balance -- a stopgap, not a real filter (see its
-        # docstring). Rather than silently drop real cash if that assumption is ever
-        # wrong, surface it so the operator can check by hand.
-        _excluded_cash = safe_float((spot_bal or {}).get("RAW_USD_USDC_DISCOVERED"), 0.0)
-        if _excluded_cash > 5.0:
-            warnings.append(
-                f"${_excluded_cash:,.2f} of USD/USDC was found in Coinbase spot accounts and is excluded from "
-                f"combined equity (assumed to already be reflected in futures balance). If this is real idle "
-                f"spot cash, combined equity below is under-reporting by this amount -- verify in the Coinbase app."
-            )
+        # v74: removed a v73 warning that fired whenever spot_accounts() zeroed
+        # discovered USD/USDC (RAW_USD_USDC_DISCOVERED). Operator confirmed that cash
+        # is the same balance already reflected in futures base equity for this
+        # account, so it was a false-positive firing every cycle, not a real signal.
+        # The underlying exclusion in spot_accounts() is correct and unchanged.
         data = {
             "ok": True,
             "server_time": now_et(),
