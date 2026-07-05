@@ -68,6 +68,24 @@ CHANGELOG v29 -> v30 (security/correctness audit fixes)
                        (previously editing only "hours" on the dashboard could have
                        no effect on the actual pause duration).
 
+CHANGELOG v30 -> v31
+--------------------
+1.  GUARD_RESIZE      - portfolio_guard_resize_target() replaces the binary
+                       leverage guard. Oversized targets are clamped to the largest
+                       whole-contract size within MAX_EFFECTIVE_LEVERAGE instead of
+                       blocking the entire trade (previously a full-conviction signal
+                       on a small account traded NOTHING). Equity buffer remains a
+                       hard block; an add is refused when the live position already
+                       sits at/over the cap (entry paths never force-reduce).
+2.  DECISION_LOG      - signal_decision_log_YYYYMMDD.jsonl (GCS, daily-partitioned):
+                       every phantom FSM transition (ARMED / EXTENSION_ACHIEVED /
+                       COMMITTED / CANCELLED / FUNDING_BLOCKED) plus core EXECUTED /
+                       EXECUTION_FAILED / EXECUTION_BLOCKED events, each with the
+                       full indicator/regime/parameter context and a setup_id that
+                       joins arm -> commit -> execution. This is the training and
+                       backtest dataset for the self-learning roadmap. All capture
+                       paths are fail-soft and can never block trading.
+
 IMPORTANT
 ---------
 Coinbase futures positions are NETTED. A SELL while LONG reduces the long; it
@@ -2710,16 +2728,49 @@ def futures_equity_summary(cb: Any) -> Dict[str, Any]:
         return {"ok": False, "error": str(e), "total_usd_balance": 0.0, "available_margin": 0.0}
 
 
-def portfolio_guard_allows_target(cb: Any, target_signed: int, price: float) -> Tuple[bool, str, Dict[str, Any]]:
+def portfolio_guard_resize_target(cb: Any, target_signed: int, current_signed: int, price: float) -> Tuple[int, bool, str, Dict[str, Any]]:
+    """v31: leverage guard RESIZES oversized targets instead of blocking them.
+
+    The old guard was binary: a score-4 signal targeting 20 contracts on a small
+    account exceeded MAX_EFFECTIVE_LEVERAGE and the ENTIRE trade was blocked --
+    the strongest signals were exactly the ones that traded nothing. Now the
+    target is clamped to the largest whole-contract size that stays within the
+    leverage cap, and only genuinely un-executable situations block:
+      - equity below MIN_FUTURES_EQUITY_BUFFER_USD (hard floor, never resized)
+      - leverage cap allows zero contracts
+      - a same-direction add when the live position already sits at/over the cap
+        (an entry path must never force-reduce an existing position)
+
+    Returns (resized_target_signed, ok, reason, info).
+    """
     bal = futures_equity_summary(cb)
     equity = safe_float(bal.get("total_usd_balance"), 0.0)
     target_notional = abs(target_signed) * CONTRACT_SIZE_BTC * price if price else 0.0
     lev = target_notional / equity if equity else None
+    info: Dict[str, Any] = {"balance": bal, "target_notional": target_notional, "projected_leverage": lev}
     if equity and equity < MIN_FUTURES_EQUITY_BUFFER_USD:
-        return False, f"Futures equity buffer too low: ${equity:,.2f} < ${MIN_FUTURES_EQUITY_BUFFER_USD:,.2f}", {"balance": bal, "target_notional": target_notional, "projected_leverage": lev}
-    if lev is not None and lev > MAX_EFFECTIVE_LEVERAGE:
-        return False, f"Projected leverage too high: {lev:.2f}x > {MAX_EFFECTIVE_LEVERAGE:.2f}x", {"balance": bal, "target_notional": target_notional, "projected_leverage": lev}
-    return True, "OK", {"balance": bal, "target_notional": target_notional, "projected_leverage": lev}
+        return target_signed, False, f"Futures equity buffer too low: ${equity:,.2f} < ${MIN_FUTURES_EQUITY_BUFFER_USD:,.2f}", info
+    if not equity or not price or price <= 0 or CONTRACT_SIZE_BTC <= 0:
+        # Leverage not computable (missing equity or price). Preserve the old
+        # behavior for this case: allow unchanged rather than block on bad data.
+        return target_signed, True, "OK (leverage not computable; equity or price unavailable)", info
+    max_allowed = int((MAX_EFFECTIVE_LEVERAGE * equity) / (CONTRACT_SIZE_BTC * price))
+    info["max_contracts_at_leverage_cap"] = max_allowed
+    if abs(target_signed) <= max_allowed:
+        return target_signed, True, "OK", info
+    if max_allowed < 1:
+        return target_signed, False, f"Leverage cap allows 0 contracts: equity ${equity:,.2f} at price ${price:,.2f}", info
+    sign = 1 if target_signed > 0 else -1
+    if current_signed * sign > 0 and abs(current_signed) >= max_allowed:
+        return target_signed, False, f"Live position already at leverage cap ({abs(current_signed)} >= {max_allowed} contracts); add skipped", info
+    resized = sign * max_allowed
+    resized_lev = (abs(resized) * CONTRACT_SIZE_BTC * price) / equity
+    info.update({"resized_from": target_signed, "resized_to": resized, "projected_leverage": resized_lev})
+    reason = (
+        f"Target resized {target_signed} -> {resized}: {MAX_EFFECTIVE_LEVERAGE:.2f}x cap allows "
+        f"{max_allowed} contracts at equity ${equity:,.2f} / price ${price:,.2f}"
+    )
+    return resized, True, reason, info
 
 # =============================================================================
 # OPTIONAL SPOT BRIDGE HOOKS
@@ -3274,7 +3325,7 @@ def maybe_handle_spot_bridge(cb: Any, gcs: GCS, state: Dict[str, Any], price: fl
 
     live = get_live_net_position(cb)
     target = live["signed_contracts"] + CONTRACTS_PER_TRADE  # bridge can only add LONG exposure
-    ok, reason, guard = portfolio_guard_allows_target(cb, target, price or live.get("current_price") or 0.0)
+    target, ok, reason, guard = portfolio_guard_resize_target(cb, target, live["signed_contracts"], price or live.get("current_price") or 0.0)
     state["last_portfolio_guard"] = {"ok": ok, "reason": reason, **guard}
     if not ok:
         state.setdefault("last_blocked_action", {})["bridge"] = reason
@@ -3295,6 +3346,126 @@ def maybe_handle_spot_bridge(cb: Any, gcs: GCS, state: Dict[str, Any], price: fl
 # HEARTBEAT / TELEMETRY
 # =============================================================================
 
+
+
+# =============================================================================
+# SIGNAL DECISION LOG (v31)
+# =============================================================================
+# Append-only JSONL capture of every signal state-machine transition and every
+# core execution/block, with the full indicator context at the moment of the
+# decision. This is the training/backtest dataset for the self-learning roadmap:
+# without it we cannot distinguish "good signal, bad sizing" from "bad signal",
+# and we cannot replay history against alternative parameters. Daily-partitioned
+# blobs keep each file small; a handful of events per day is the expected volume.
+# Data capture must NEVER interfere with trading: every entry point is fail-soft.
+
+DECISION_LOG_BLOB_PREFIX = "signal_decision_log"
+
+
+def _decision_log_blob_name(dt: Optional[datetime] = None) -> str:
+    return f"{DECISION_LOG_BLOB_PREFIX}_{(dt or now_utc()).strftime('%Y%m%d')}.jsonl"
+
+
+def _new_setup_id() -> str:
+    return f"setup-{int(time.time())}-{os.urandom(3).hex()}"
+
+
+def append_decision_event(gcs: GCS, event: Dict[str, Any]) -> None:
+    """Append one JSONL row to today's decision log. Never raises."""
+    try:
+        row = dict(event)
+        row.setdefault("ts", iso_utc())
+        blob = _decision_log_blob_name()
+        existing = gcs.read_text(blob, default="")
+        line = json.dumps(row, default=str)
+        body = (existing.rstrip("\n") + "\n" if existing.strip() else "") + line + "\n"
+        gcs.write_text(blob, body, content_type="application/json")
+    except Exception as e:
+        log.warning("Decision log append failed (non-fatal): %s", e)
+
+
+def decision_context(sig: SignalSnapshot, funding_rate: float, macro: Dict[str, Any], live_signed: int) -> Dict[str, Any]:
+    """Full indicator + regime + parameter snapshot at the moment of a decision."""
+    macro = macro or {}
+    return {
+        "price": safe_float(sig.price, 0.0),
+        "rsi": sig.rsi,
+        "stoch_rsi": sig.stoch_rsi,
+        "lower_bb": sig.lower_bb,
+        "mid_bb": sig.mid_bb,
+        "upper_bb": sig.upper_bb,
+        "atr": sig.atr,
+        "volume_ratio": sig.volume_ratio,
+        "long_score": sig.long_score,
+        "short_score": sig.short_score,
+        "long_conditions": sig.long_conditions,
+        "short_conditions": sig.short_conditions,
+        "funding_rate": funding_rate,
+        "macro_gate_open": bool(macro.get("gate_open")),
+        "macro_fast_sma": macro.get("fast_sma"),
+        "macro_slow_sma": macro.get("slow_sma"),
+        "live_signed_contracts": live_signed,
+        "params": {
+            "ATR_STOP_MULTIPLIER": ATR_MULTIPLIER,
+            "TSL_ACTIVATION_PCT": TSL_ACTIVATION_PCT,
+            "TSL_TRAIL_PCT": TSL_TRAIL_PCT,
+            "SIGNAL_ARM_SCORE": SIGNAL_ARM_SCORE,
+            "SIGNAL_COMMIT_SCORE": SIGNAL_COMMIT_SCORE,
+            "SIGNAL_CANCEL_SCORE": SIGNAL_CANCEL_SCORE,
+            "REVERSAL_NEAR_BB_PCT": REVERSAL_NEAR_BB_PCT,
+            "MAX_CONVICTION_CONTRACTS": MAX_CONVICTION_CONTRACTS,
+            "MAX_EFFECTIVE_LEVERAGE": MAX_EFFECTIVE_LEVERAGE,
+            "FUNDING_LONG_MAX": FUNDING_LONG_MAX,
+            "FUNDING_SHORT_MIN": FUNDING_SHORT_MIN,
+        },
+    }
+
+
+def log_phantom_transition(gcs: GCS, before: Dict[str, Any], after: Dict[str, Any], ctx: Dict[str, Any]) -> None:
+    """Emit one event when the phantom FSM meaningfully changed this cycle.
+
+    Meaningful = (state, direction, extension_achieved) tuple changed. The reason
+    string mutates every cycle while ARMED (it embeds live price), so it must not
+    itself trigger events.
+    """
+    try:
+        before = before or {}
+        after = after or {}
+        b = (str(before.get("state") or "MONITORING"), before.get("direction"), bool(before.get("extension_achieved")))
+        a = (str(after.get("state") or "MONITORING"), after.get("direction"), bool(after.get("extension_achieved")))
+        if b == a:
+            return
+        b_state, a_state = b[0], a[0]
+        armed_states = ("PHANTOM_ARMED", "EXTENSION_CONFIRMED", "COMMITTED_ENTRY")
+        if a_state == "PHANTOM_ARMED" and b_state not in armed_states:
+            event = "ARMED"
+        elif a[2] and not b[2]:
+            event = "EXTENSION_ACHIEVED"
+        elif a_state == "COMMITTED_ENTRY":
+            event = "COMMITTED"
+        elif a_state == "FUNDING_BLOCKED":
+            event = "FUNDING_BLOCKED"
+        elif a_state == "MONITORING" and b_state in armed_states:
+            # Covers cancel, expiry, and macro-clear paths; the reason says which.
+            event = "CANCELLED"
+        else:
+            event = "TRANSITION"
+        append_decision_event(gcs, {
+            "event": event,
+            "from_state": b_state,
+            "to_state": a_state,
+            "direction": after.get("direction") or before.get("direction"),
+            "signal_class": after.get("signal_class") or before.get("signal_class") or "CORE",
+            "setup_id": after.get("setup_id") or before.get("setup_id"),
+            "locked_score": after.get("locked_score"),
+            "locked_confidence_pct": after.get("locked_confidence_pct"),
+            "locked_target_contracts": after.get("locked_target_contracts"),
+            "extension_achieved": a[2],
+            "reason": after.get("reason") or before.get("reason"),
+            **ctx,
+        })
+    except Exception as e:
+        log.warning("log_phantom_transition failed (non-fatal): %s", e)
 
 
 def _safe_request_id(payload: Dict[str, Any]) -> str:
@@ -3770,14 +3941,19 @@ def run_once(cb: Any, gcs: GCS) -> None:
                     if cd_ext.get("active"):
                         state.setdefault("last_blocked_action", {})["perp_extension_add"] = f"Extension add cooldown active: {cd_ext['remaining_seconds']}s remaining"
                     else:
+                        # v31: resize BEFORE building the plan so the plan reflects the
+                        # leverage-capped target rather than the aspirational one.
+                        target_ext, ok_ext, guard_reason_ext, guard_ext = portfolio_guard_resize_target(cb, target_ext, live_signed_for_ext, sig.price or live_for_entries.get("current_price") or 0.0)
                         plan_ext = safe_target_order_plan(live_signed_for_ext, target_ext)
                         decision_ext = sizing_decision_for_signal("LONG" if live_signed_for_ext > 0 else "SHORT", SIGNAL_COMMIT_SCORE, get_funding_rate(product), bool((state.get("macro_regime") or {}).get("gate_open")))
                         decision_ext["reason"] = "phantom_extension_add_on"
                         decision_ext["target_abs_contracts"] = abs(target_ext)
                         decision_ext["final_contracts"] = abs(target_ext)
+                        if guard_ext.get("resized_to") is not None:
+                            decision_ext["leverage_resized"] = True
+                            decision_ext["resize_note"] = guard_reason_ext
                         plan_ext["sizing_decision"] = decision_ext
                         state["last_core_target_plan"] = plan_ext
-                        ok_ext, guard_reason_ext, guard_ext = portfolio_guard_allows_target(cb, target_ext, sig.price or live_for_entries.get("current_price") or 0.0)
                         state["last_portfolio_guard"] = {"ok": ok_ext, "reason": guard_reason_ext, **guard_ext}
                         if ok_ext and plan_ext.get("action") not in (None, "NONE"):
                             extension_add_result = execute_target(cb, gcs, target_ext, "PHANTOM_EXTENSION_ADD_ON", signal_class="PHANTOM_EXTENSION_ADD_ON")
@@ -3800,7 +3976,17 @@ def run_once(cb: Any, gcs: GCS) -> None:
         elif ENABLE_CORE_PERP_ENTRIES and entry_mgmt.get("allow_bot_to_trade_position"):
             entries_allowed, reason = risk_allows_entry(state)
             if entries_allowed:
-                confirmed = update_phantom_state(state, sig, get_funding_rate(product), candles)
+                # v31 decision log: snapshot the FSM around the update so every
+                # arm/extension/commit/cancel transition is captured with full
+                # indicator context. Fail-soft: logging never blocks trading.
+                _ph_before = dict(state.get("phantom") or {})
+                _funding_now = get_funding_rate(product)
+                confirmed = update_phantom_state(state, sig, _funding_now, candles)
+                _ph_after = state.get("phantom") or {}
+                if str(_ph_after.get("state") or "").upper() in ("PHANTOM_ARMED", "EXTENSION_CONFIRMED", "COMMITTED_ENTRY") and not _ph_after.get("setup_id"):
+                    _ph_after["setup_id"] = _new_setup_id()
+                _dctx = decision_context(sig, _funding_now, state.get("macro_regime") or {}, safe_int((state.get("last_exchange_position") or {}).get("signed_contracts"), 0))
+                log_phantom_transition(gcs, _ph_before, _ph_after, _dctx)
                 if confirmed:
                     # v12: check the per-direction cooldown, not the merged one.
                     cd_key = "perp_last_long_entry_at" if confirmed == "LONG" else "perp_last_short_entry_at"
@@ -3837,6 +4023,16 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         target = core_target_for_signal(live_now["signed_contracts"], confirmed, _score, _funding, _macro_open)
                         if FREEZE_CONFIDENCE_ON_ARM and _ctx.get("target_abs_contracts"):
                             target = clamp_target((+1 if confirmed == "LONG" else -1) * safe_int(_ctx.get("target_abs_contracts"), 0))
+                        # v31: resize BEFORE building the plan / progressive-add check so
+                        # everything downstream sees the leverage-capped target. A strong
+                        # signal now executes at the largest safe size instead of being
+                        # blocked outright when full conviction exceeds the leverage cap.
+                        target, ok, guard_reason, guard = portfolio_guard_resize_target(cb, target, live_now["signed_contracts"], sig.price or live_now.get("current_price") or 0.0)
+                        if guard.get("resized_to") is not None:
+                            sizing_decision["leverage_resized"] = True
+                            sizing_decision["target_abs_contracts"] = abs(target)
+                            sizing_decision["final_contracts"] = abs(target)
+                            sizing_decision["resize_note"] = guard_reason
                         plan_preview = safe_target_order_plan(live_now["signed_contracts"], target)
                         plan_preview["sizing_decision"] = sizing_decision
                         add_ok, add_reason = should_allow_progressive_add(state, live_now["signed_contracts"], target, sizing_decision)
@@ -3847,15 +4043,29 @@ def run_once(cb: Any, gcs: GCS) -> None:
                                  plan_preview.get("action"), plan_preview.get("contracts_needed"))
                         state["last_core_sizing_decision"] = sizing_decision
                         state["last_core_target_plan"] = plan_preview
-                        ok, guard_reason, guard = portfolio_guard_allows_target(cb, target, sig.price or live_now.get("current_price") or 0.0)
                         if not add_ok:
                             ok = False
                             guard_reason = add_reason
                         state["last_portfolio_guard"] = {"ok": ok, "reason": guard_reason, **guard}
+                        _setup_id = (state.get("phantom") or {}).get("setup_id")
                         if ok:
                             _locked_class = ((state.get("phantom") or {}).get("signal_class") or "CORE")
                             core_reason = f"REVERSAL_PROBE_{confirmed}_PHANTOM_CONFIRMED" if _locked_class == "REVERSAL_PROBE" else f"CORE_IAF_{confirmed}_PHANTOM_CONFIRMED"
                             last_result = execute_target(cb, gcs, target, core_reason, signal_class=core_reason)
+                            append_decision_event(gcs, {
+                                "event": "EXECUTED" if last_result.get("ok") else "EXECUTION_FAILED",
+                                "setup_id": _setup_id,
+                                "signal_class": core_reason,
+                                "direction": confirmed,
+                                "target_signed": target,
+                                "leverage_resized": bool(guard.get("resized_to") is not None),
+                                "resized_from": guard.get("resized_from"),
+                                "client_order_id": (last_result.get("order") or {}).get("client_order_id"),
+                                "fill_price": (last_result.get("fills") or {}).get("avg_price"),
+                                "before_signed": safe_int((last_result.get("before") or {}).get("signed_contracts"), 0),
+                                "after_signed": safe_int((last_result.get("after") or {}).get("signed_contracts"), 0),
+                                **_dctx,
+                            })
                             if last_result.get("ok"):
                                 if last_result.get("plan", {}).get("action") not in (None, "NONE"):
                                     state["last_completed_trade"] = last_result
@@ -3873,6 +4083,14 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             state["phantom"] = default_engine_state()["phantom"]
                         else:
                             state.setdefault("last_blocked_action", {})["perp"] = guard_reason
+                            append_decision_event(gcs, {
+                                "event": "EXECUTION_BLOCKED",
+                                "setup_id": _setup_id,
+                                "direction": confirmed,
+                                "target_signed": target,
+                                "reason": guard_reason,
+                                **_dctx,
+                            })
             else:
                 state.setdefault("phantom", {})["reason"] = reason
 
