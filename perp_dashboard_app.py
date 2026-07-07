@@ -766,6 +766,268 @@ def send_dashboard_telegram_message(text: str) -> bool:
         return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# v77: ad-hoc performance SNAPSHOT email (operator-triggered, investor-shareable)
+# Reuses the same data helpers as /api/data; read-only; behind PIN-gated session.
+# Email sending mirrors the bot's SMTP pattern (EMAIL_PASSWORD in Secret Manager).
+# ─────────────────────────────────────────────────────────────────────────────
+def send_dashboard_email(subject: str, html_body: str, to_addr: Optional[str] = None) -> (bool, str):
+    cfg = load_config()
+    email_from = str(cfg.get("EMAIL_FROM") or "lockinlarry2@gmail.com")
+    email_to = (to_addr or str(cfg.get("EMAIL_TO") or email_from)).strip()
+    host = str(cfg.get("SMTP_HOST") or "smtp.gmail.com")
+    port = int(safe_float(cfg.get("SMTP_PORT"), 465) or 465)
+    try:
+        pw = secret("EMAIL_PASSWORD")
+    except Exception as e:
+        app.logger.error("snapshot email: EMAIL_PASSWORD unavailable: %s", e)
+        return False, "Email is not configured (EMAIL_PASSWORD secret missing)."
+    if not pw:
+        return False, "Email is not configured (EMAIL_PASSWORD empty)."
+    import smtplib
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = subject
+    msg["From"] = f"Larry BTC Perp <{email_from}>"
+    msg["To"] = email_to
+    msg.attach(MIMEText("This is a Larry performance snapshot. View it in an HTML-capable email client.", "plain"))
+    msg.attach(MIMEText(html_body, "html"))
+    try:
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=25) as s:
+                s.login(email_from, pw)
+                s.sendmail(email_from, [email_to], msg.as_string())
+        else:
+            with smtplib.SMTP(host, port, timeout=25) as s:
+                s.starttls()
+                s.login(email_from, pw)
+                s.sendmail(email_from, [email_to], msg.as_string())
+        return True, email_to
+    except Exception as e:
+        app.logger.exception("snapshot email send failed")
+        return False, f"Send failed: {e}"
+
+
+def _snapshot_status(halt_state, risk_gate, engine_state, macro, open_contracts):
+    """Return (label, hex_color, detail) describing whether Larry is primed to trade."""
+    if bool((halt_state or {}).get("halt")):
+        return "HALTED", "#f0565c", "Kill switch is active — no orders will be placed."
+    mstat = (engine_state or {}).get("manual_position_status") or {}
+    if mstat.get("is_manual_or_external") and not mstat.get("allow_bot_to_trade_position", True):
+        return "MONITORING", "#4da3ff", "A manual position is under monitor-only supervision; the core engine is observing, not managing it."
+    if (risk_gate or {}).get("entries_allowed") is False:
+        return "PAUSED", "#f0c440", (risk_gate or {}).get("reason") or "Risk gate has paused new entries."
+    phantom = str(((engine_state or {}).get("phantom") or {}).get("state") or "").upper()
+    if phantom in ("PHANTOM_ARMED", "EXTENSION_CONFIRMED", "COMMITTED_ENTRY"):
+        return "ARMED", "#2dd47e", "A setup is armed and awaiting closed-candle confirmation to execute."
+    if open_contracts:
+        return "IN POSITION", "#2dd47e", "Managing a live position with active ATR / trailing-stop protection."
+    if not bool((macro or {}).get("gate_open")):
+        return "SCANNING", "#94a1b6", "Risk gate open; macro filter not fully bullish, so long/bridge entries may be restricted."
+    return "PRIMED", "#2dd47e", "Risk gate open and scanning for the next qualifying setup."
+
+
+def build_snapshot() -> Dict[str, Any]:
+    cfg = load_config()
+    perp_product = cfg["PERP_PRODUCT_ID"]
+    spot_product = cfg.get("SPOT_PRODUCT_ID") or "BTC-USDC"
+    fallback = cfg.get("SPOT_FALLBACK_PRODUCT_ID") or "BTC-USD"
+    perp_meta = product_details(perp_product)
+    btc_price = best_mid(spot_product) or best_mid(fallback) or safe_float(perp_meta.get("price"), 0)
+    contract_size = safe_float(perp_meta.get("contract_size"), safe_float(cfg.get("CONTRACT_SIZE_BTC"), 0.01)) or 0.01
+    fut_bal = futures_balance()
+    spot_bal = spot_accounts(btc_price or 0)
+    cap = load_capital_state()
+    ex_positions = futures_positions(perp_product, contract_size)
+    tracking_start = cap.get("tracking_start_timestamp")
+    fills = recent_fills(perp_product, 100, tracking_start)
+    current_mark = 0.0
+    if ex_positions:
+        current_mark = safe_float(ex_positions[0].get("current_price"), 0.0) or safe_float(btc_price, 0.0)
+    clean_book = clean_book_from_opening(cap, fills, current_mark, perp_product, ex_positions)
+    pnl = pnl_summary(fut_bal, fills, ex_positions, clean_book)
+    capital = combined_capital(spot_bal, fut_bal, cap)
+    engine_state = read_json(GCS_PERP_STATE, {}) or {}
+    if not isinstance(engine_state, dict):
+        engine_state = {}
+    larry = larry_trade_ledger_summary(engine_state, tracking_start)
+    macro_df = candles_df(fallback, cfg.get("MACRO_GRANULARITY", "ONE_HOUR"), 300)
+    mac = macro_snapshot(macro_df)
+    risk_gate = live_risk_gate_state(engine_state, cfg, mac)
+    halt_state = read_json(GCS_BOT_HALT, {}) or {}
+
+    ts = larry.get("trade_stats", {}) or {}
+    ex = larry.get("exposure_stats", {}) or {}
+    start_capital = safe_float(capital.get("starting_combined_capital"), None)
+    larry_total = safe_float(larry.get("net_total_pnl_usd"), 0.0)
+    return_pct = (larry_total / start_capital * 100.0) if start_capital not in (None, 0) else None
+
+    # Benchmark vs passive BTC bought with the same starting capital.
+    start_btc = (safe_float(cap.get("starting_btc_price"), None)
+                 or safe_float(cap.get("benchmark_start_btc_price"), None)
+                 or safe_float(larry.get("benchmark_start_btc_price_proxy"), None))
+    bench_ret = None
+    alpha_pct = None
+    if start_capital not in (None, 0) and start_btc not in (None, 0) and btc_price:
+        bench_val = (start_capital / start_btc) * btc_price
+        bench_ret = (bench_val - start_capital) / start_capital * 100.0
+        if return_pct is not None:
+            alpha_pct = return_pct - bench_ret
+
+    pos = ex_positions[0] if ex_positions else None
+    open_contracts = safe_float((pos or {}).get("contracts"), 0.0) if pos else 0.0
+    label, color, detail = _snapshot_status(halt_state, risk_gate, engine_state, mac, open_contracts)
+
+    now = datetime.now(TZ)
+    return {
+        "as_of": now.strftime("%A, %B %-d, %Y · %-I:%M %p ET"),
+        "as_of_short": now.strftime("%b %-d, %Y"),
+        "btc_price": btc_price,
+        "status_label": label, "status_color": color, "status_detail": detail,
+        "net_pnl_usd": larry_total,
+        "return_pct": return_pct,
+        "equity_usd": (start_capital + larry_total) if start_capital is not None else None,
+        "start_capital_usd": start_capital,
+        "benchmark_return_pct": bench_ret,
+        "alpha_pct": alpha_pct,
+        "realized_trades": ts.get("realized_trades"),
+        "win_rate_pct": ts.get("win_rate_pct"),
+        "profit_factor": ts.get("profit_factor"),
+        "expectancy_usd": ts.get("expectancy_usd"),
+        "avg_slippage_bps": larry.get("avg_slippage_bps"),
+        "long_pct": ex.get("long_pct"), "short_pct": ex.get("short_pct"), "flat_pct": ex.get("flat_pct"),
+        "open_side": (pos or {}).get("side") if pos else "FLAT",
+        "open_contracts": open_contracts,
+        "open_avg_entry": safe_float((pos or {}).get("avg_entry_price"), 0.0) if pos else 0.0,
+        "open_mark": current_mark if pos else 0.0,
+        "open_unrealized_usd": safe_float((pos or {}).get("book_unrealized_pnl", (pos or {}).get("exchange_unrealized_pnl")), 0.0) if pos else 0.0,
+        "macro_state": mac.get("regime") or ("BULLISH" if mac.get("gate_open") else "MIXED"),
+        "product": perp_product,
+    }
+
+
+def render_snapshot_email_html(s: Dict[str, Any]) -> str:
+    def usd(n):
+        if n is None:
+            return "—"
+        n = float(n)
+        return ("-" if n < 0 else "") + "$" + f"{abs(n):,.2f}"
+    def pct(n, dp=1):
+        return "—" if n is None else f"{float(n):,.{dp}f}%"
+    def signed_pct(n, dp=1):
+        if n is None:
+            return "—"
+        return ("+" if float(n) >= 0 else "") + f"{float(n):,.{dp}f}%"
+    def numf(n, dp=2):
+        return "—" if n is None else f"{float(n):,.{dp}f}"
+    def col(n):
+        if n is None:
+            return "#e9eef5"
+        return "#2dd47e" if float(n) >= 0 else "#f0565c"
+
+    lp = max(0.0, min(100.0, safe_float(s.get("long_pct"), 0.0)))
+    sp = max(0.0, min(100.0, safe_float(s.get("short_pct"), 0.0)))
+    fp = max(0.0, min(100.0, safe_float(s.get("flat_pct"), 0.0)))
+    tot = lp + sp + fp or 1.0
+    lw, sw, fw = round(lp / tot * 100), round(sp / tot * 100), round(fp / tot * 100)
+
+    open_line = "Flat — no open position"
+    if s.get("open_side") and str(s.get("open_side")).upper() not in ("FLAT", ""):
+        open_line = (f"{s['open_side']} {numf(s['open_contracts'],0)} contracts &nbsp;·&nbsp; "
+                     f"entry {usd(s['open_avg_entry'])} &nbsp;·&nbsp; mark {usd(s['open_mark'])} &nbsp;·&nbsp; "
+                     f"<span style=\"color:{col(s['open_unrealized_usd'])}\">unrealized {usd(s['open_unrealized_usd'])}</span>")
+
+    def kpi(label, value, vcolor="#e9eef5", sub=""):
+        subhtml = f'<div style="font-size:11px;color:#5f6a7c;margin-top:3px">{sub}</div>' if sub else ""
+        return (f'<td width="50%" style="padding:7px">'
+                f'<div style="background:#141a23;border:1px solid #212a37;border-radius:12px;padding:14px 16px">'
+                f'<div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#94a1b6;font-weight:bold">{label}</div>'
+                f'<div style="font-size:22px;font-weight:bold;color:{vcolor};margin-top:6px">{value}</div>{subhtml}</div></td>')
+
+    return f"""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#07080b">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#07080b">
+<tr><td align="center" style="padding:24px 12px">
+<table role="presentation" width="600" cellpadding="0" cellspacing="0" style="width:600px;max-width:600px;font-family:Arial,Helvetica,sans-serif">
+
+  <tr><td style="background:#141a23;border:1px solid #212a37;border-top:3px solid #f7931a;border-radius:16px 16px 0 0;padding:24px 26px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+      <td style="font-size:22px;font-weight:bold;color:#e9eef5">
+        <span style="display:inline-block;width:34px;height:34px;background:#f7931a;color:#1c1104;border-radius:9px;text-align:center;line-height:34px;font-size:19px;font-weight:bold;vertical-align:middle;margin-right:9px">&#8383;</span>
+        Larry BTC Perp
+      </td>
+      <td align="right" style="font-size:12px;color:#94a1b6">{s['as_of']}</td>
+    </tr></table>
+    <div style="margin-top:16px">
+      <span style="display:inline-block;background:{s['status_color']};color:#07080b;font-size:12px;font-weight:bold;letter-spacing:.06em;padding:6px 12px;border-radius:7px">{s['status_label']}</span>
+      <span style="font-size:13px;color:#94a1b6;margin-left:10px">{s['status_detail']}</span>
+    </div>
+    <div style="font-size:12px;color:#5f6a7c;margin-top:12px">BTC {usd(s['btc_price'])} &nbsp;·&nbsp; Macro regime: {s['macro_state']} &nbsp;·&nbsp; {s['product']}</div>
+  </td></tr>
+
+  <tr><td style="background:#0e1218;border-left:1px solid #212a37;border-right:1px solid #212a37;padding:10px 18px 4px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr>{kpi("Net P&amp;L (since inception)", usd(s['net_pnl_usd']), col(s['net_pnl_usd']), "Ledger realized + open unrealized, net of fees")}
+          {kpi("Return on capital", signed_pct(s['return_pct']), col(s['return_pct']), f"Alpha vs BTC buy-and-hold: {signed_pct(s['alpha_pct']) if s['alpha_pct'] is not None else '—'}")}</tr>
+      <tr>{kpi("Win rate", pct(s['win_rate_pct'],0), "#e9eef5", f"Profit factor {numf(s['profit_factor'],2)} · expectancy {usd(s['expectancy_usd'])}/trade")}
+          {kpi("Trades executed", numf(s['realized_trades'],0), "#e9eef5", f"Avg slippage {numf(s['avg_slippage_bps'],1)} bps")}</tr>
+    </table>
+  </td></tr>
+
+  <tr><td style="background:#0e1218;border-left:1px solid #212a37;border-right:1px solid #212a37;padding:8px 26px 6px">
+    <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#94a1b6;font-weight:bold;margin-bottom:8px">Current Position</div>
+    <div style="font-size:14px;color:#e9eef5;font-weight:bold">{open_line}</div>
+  </td></tr>
+
+  <tr><td style="background:#0e1218;border-left:1px solid #212a37;border-right:1px solid #212a37;padding:14px 26px 18px">
+    <div style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:#94a1b6;font-weight:bold;margin-bottom:8px">Market Exposure Since Inception</div>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-radius:8px;overflow:hidden"><tr>
+      <td width="{lw}%" height="26" style="background:#2dd47e"></td>
+      <td width="{sw}%" height="26" style="background:#f0565c"></td>
+      <td width="{fw}%" height="26" style="background:#212a37"></td>
+    </tr></table>
+    <div style="font-size:12px;color:#94a1b6;margin-top:8px">
+      <span style="color:#2dd47e">&#9632;</span> Long {pct(s['long_pct'],0)} &nbsp;&nbsp;
+      <span style="color:#f0565c">&#9632;</span> Short {pct(s['short_pct'],0)} &nbsp;&nbsp;
+      <span style="color:#94a1b6">&#9632;</span> Flat {pct(s['flat_pct'],0)}
+    </div>
+  </td></tr>
+
+  <tr><td style="background:#0e1218;border:1px solid #212a37;border-top:0;border-radius:0 0 16px 16px;padding:16px 26px 20px">
+    <div style="font-size:11px;color:#5f6a7c;line-height:1.6">
+      Systematic Bitcoin perpetual-futures engine · rule-based, bidirectional, risk-management-first. Figures are drawn live from the exchange-reconciled ledger at the time shown. Trading digital-asset derivatives involves substantial risk of loss; past performance is not indicative of future results. Prepared for discussion purposes only — not an offer or solicitation.
+    </div>
+  </td></tr>
+
+</table>
+</td></tr></table>
+</body></html>"""
+
+
+@app.route("/api/snapshot", methods=["POST"])
+def api_snapshot():
+    """Generate and email an ad-hoc branded performance snapshot. Session-gated."""
+    try:
+        body = request.get_json(silent=True) or {}
+        to_addr = (body.get("to") or "").strip() or None
+        if to_addr and ("@" not in to_addr or " " in to_addr or "." not in to_addr):
+            return jsonify({"ok": False, "error": "That doesn't look like a valid email address."}), 400
+        snap = build_snapshot()
+        html = render_snapshot_email_html(snap)
+        ok, info = send_dashboard_email(f"Larry BTC Perp — Performance Snapshot ({snap['as_of_short']})", html, to_addr)
+        if not ok:
+            return jsonify({"ok": False, "error": info}), 500
+        try:
+            send_dashboard_telegram_message(f"📸 Snapshot emailed to {info} — status {snap['status_label']}, net P&L {snap['net_pnl_usd']:.2f}.")
+        except Exception:
+            pass
+        return jsonify({"ok": True, "sent_to": info, "status": snap["status_label"]})
+    except Exception as e:
+        app.logger.exception("snapshot failed")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def _coinbase_order_success(payload: Any) -> bool:
     """Return True only when Coinbase explicitly reports order success.
     The SDK can return HTTP 200 with success=false for preview/execution failures,
@@ -3526,7 +3788,7 @@ button,input,select{font-family:inherit}
 .v12-title,.intel-title,.tm-stat .label,.trigger-tile .label,.trigger-lane-card .label,.nearest-card .label,.score-reconcile-card .title{text-transform:uppercase;letter-spacing:.07em;font-size:.62rem;font-weight:700}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 </style></head><body><div class="app">
-<header class="hero"><div class="hero-row"><div><div class="brand">₿ Larry BTC Perp Command Center</div><div class="sub" id="productLine">Spot + Perp · Coinbase-only</div></div><div><div class="price" id="btcPrice">—</div><div class="sub" id="serverTime">—</div></div></div><div class="pill-row"><span class="pill blue" id="botHealth">BOT —</span><span class="pill blue" id="botState">STATE —</span><span class="pill blue" id="macroPill">MACRO —</span><span class="pill purple" id="sessionPill">SESSION —</span><button class="pill" style="cursor:pointer;border:none" onclick="signOut()">Sign out</button></div></header>
+<header class="hero"><div class="hero-row"><div><div class="brand">₿ Larry BTC Perp Command Center</div><div class="sub" id="productLine">Spot + Perp · Coinbase-only</div></div><div><div class="price" id="btcPrice">—</div><div class="sub" id="serverTime">—</div></div></div><div class="pill-row"><span class="pill blue" id="botHealth">BOT —</span><span class="pill blue" id="botState">STATE —</span><span class="pill blue" id="macroPill">MACRO —</span><span class="pill purple" id="sessionPill">SESSION —</span><button class="pill" style="cursor:pointer;border:1px solid rgba(247,147,26,.5);background:rgba(247,147,26,.12);color:#ffbf69;font-weight:700" onclick="sendSnapshot(event)">📸 Snapshot</button><button class="pill" style="cursor:pointer;border:none" onclick="signOut()">Sign out</button></div></header>
 <div class="errbox" id="errorBox"></div><div class="warnbox" id="warnBox"></div>
 <main class="grid">
 <section class="card span12"><h2>Mission Control <span class="method-badge">performance-first · ledger P&L · live risk</span></h2><div class="metric-row"><div class="metric"><div class="label">Starting Capital / Baseline</div><div class="val" id="startingCapital">—</div><div class="mini" id="baselineSource">Baseline source —</div></div><div class="metric"><div class="label">Current Combined Equity</div><div class="val" id="currentCapital">—</div><div class="mini" id="currentCapitalMini">Reference: futures equity + verified spot BTC</div></div><div class="metric"><div class="label">Larry Net P&L</div><div class="val" id="netPnl">—</div><div class="mini">Ledger realized + live bot UPL</div></div><div class="metric"><div class="label">Larry Return on Capital</div><div class="val" id="netReturn">—</div><div class="mini">Larry P&L / baseline</div></div></div><div class="pnl-note" id="pnlMethodNote">Top-line Larry performance is driven by Larry's own ledger: net realized P&L plus live bot-managed unrealized P&L. Coinbase account equity remains a separate reference.</div></section>
@@ -3591,6 +3853,18 @@ button,input,select{font-family:inherit}
   };
 })();
 async function signOut(){ await fetch('/logout',{method:'POST'}); window.location.href='/login'; }
+async function sendSnapshot(ev){
+  const to = prompt('Email the snapshot to (leave blank to send to the address on file):', '');
+  if(to===null) return; // cancelled
+  const btn = ev && ev.target; const orig = btn ? btn.innerHTML : '';
+  if(btn){ btn.disabled = true; btn.innerHTML = 'Sending…'; }
+  try{
+    const r = await fetch('/api/snapshot', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({to: to.trim()})});
+    const d = await r.json();
+    alert(d.ok ? ('✅ Snapshot emailed to '+d.sent_to+'\nStatus: '+(d.status||'—')) : ('Snapshot failed: '+(d.error||'unknown')));
+  }catch(e){ alert('Snapshot failed: '+e); }
+  finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig || '📸 Snapshot'; } }
+}
 const $=id=>document.getElementById(id); const num=(n,d=2)=>n==null||isNaN(n)?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 function fmtET(ts){ if(!ts) return '—'; try { return new Date(ts).toLocaleString('en-US',{timeZone:'America/New_York',weekday:'short',month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})+' ET'; } catch(e){ return String(ts); } }
 const usd=n=>n==null||isNaN(n)?'—':(Number(n)<0?'-':'')+'$'+num(Math.abs(Number(n)),2); const pct=n=>n==null||isNaN(n)?'—':num(n,2)+'%';
