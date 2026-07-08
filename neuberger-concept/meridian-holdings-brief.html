@@ -1,0 +1,668 @@
+<title>Meridian — Holdings Intelligence</title>
+<style>
+  /* ---------- tokens ---------- */
+  :root {
+    --page: #f2f4f5;
+    --card: #fdfdfc;
+    --card-2: #f6f8f9;
+    --ink: #12181e;
+    --sec: #4a5560;
+    --muted: #7d8790;
+    --hair: #e2e6e8;
+    --hair-strong: #cdd4d8;
+    --accent: #1b4e8c;
+    --accent-ink: #1b4e8c;
+    --accent-soft: #e3ecf6;
+    --pos: #0a7a34;
+    --pos-fill: #17a24f;
+    --pos-soft: #e3f2e8;
+    --neg: #c03434;
+    --neg-fill: #d64545;
+    --neg-soft: #f9e8e8;
+    --warn: #8f640e;
+    --warn-fill: #e8a91d;
+    --warn-soft: #f8efdc;
+    --spark-grid: #eceff0;
+    --shadow: 0 1px 2px rgba(18,24,30,.05), 0 8px 24px rgba(18,24,30,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --page: #0e1114;
+      --card: #171b1f;
+      --card-2: #1d2227;
+      --ink: #f2f4f5;
+      --sec: #aeb6bd;
+      --muted: #78828a;
+      --hair: #262c31;
+      --hair-strong: #333b41;
+      --accent: #6ea8e8;
+      --accent-ink: #8fbdf1;
+      --accent-soft: #1d2c3e;
+      --pos: #3ecf74;
+      --pos-fill: #2fae62;
+      --pos-soft: #14281c;
+      --neg: #f07070;
+      --neg-fill: #e05c5c;
+      --neg-soft: #2e1a1a;
+      --warn: #f0b429;
+      --warn-fill: #d99a16;
+      --warn-soft: #2b2211;
+      --spark-grid: #21272c;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"] {
+    --page: #0e1114; --card: #171b1f; --card-2: #1d2227; --ink: #f2f4f5;
+    --sec: #aeb6bd; --muted: #78828a; --hair: #262c31; --hair-strong: #333b41;
+    --accent: #6ea8e8; --accent-ink: #8fbdf1; --accent-soft: #1d2c3e;
+    --pos: #3ecf74; --pos-fill: #2fae62; --pos-soft: #14281c;
+    --neg: #f07070; --neg-fill: #e05c5c; --neg-soft: #2e1a1a;
+    --warn: #f0b429; --warn-fill: #d99a16; --warn-soft: #2b2211;
+    --spark-grid: #21272c;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+  :root[data-theme="light"] {
+    --page: #f2f4f5; --card: #fdfdfc; --card-2: #f6f8f9; --ink: #12181e;
+    --sec: #4a5560; --muted: #7d8790; --hair: #e2e6e8; --hair-strong: #cdd4d8;
+    --accent: #1b4e8c; --accent-ink: #1b4e8c; --accent-soft: #e3ecf6;
+    --pos: #0a7a34; --pos-fill: #17a24f; --pos-soft: #e3f2e8;
+    --neg: #c03434; --neg-fill: #d64545; --neg-soft: #f9e8e8;
+    --warn: #8f640e; --warn-fill: #e8a91d; --warn-soft: #f8efdc;
+    --spark-grid: #eceff0;
+    --shadow: 0 1px 2px rgba(18,24,30,.05), 0 8px 24px rgba(18,24,30,.06);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 28px 24px 56px; }
+
+  /* ---------- masthead ---------- */
+  .masthead {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 20px;
+    border-bottom: 3px solid var(--ink); padding-bottom: 14px; margin-bottom: 6px;
+  }
+  .brand {
+    font-family: Georgia, "Times New Roman", serif;
+    font-size: 34px; font-weight: 700; letter-spacing: .01em; line-height: 1.1;
+  }
+  .brand .tick { color: var(--accent-ink); }
+  .brand-sub {
+    font-family: Georgia, serif; font-style: italic;
+    color: var(--sec); font-size: 15px;
+  }
+  .mast-meta { margin-left: auto; text-align: right; font-size: 12px; color: var(--muted); }
+  .mast-meta strong { color: var(--ink); font-weight: 600; }
+  .dateline {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center;
+    padding: 10px 0 22px; font-size: 12.5px; color: var(--sec);
+    border-bottom: 1px solid var(--hair); margin-bottom: 24px;
+  }
+  .dateline .sep { color: var(--hair-strong); }
+  .badge-live {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--accent-soft);
+    border-radius: 999px; padding: 3px 10px;
+  }
+  .badge-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+  /* ---------- KPI strip ---------- */
+  .kpis {
+    display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 24px;
+  }
+  .kpi {
+    background: var(--card); border: 1px solid var(--hair); border-radius: 10px;
+    padding: 12px 14px; box-shadow: var(--shadow);
+  }
+  .kpi .k-label {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .09em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 6px; white-space: nowrap;
+  }
+  .kpi .k-value { font-size: 21px; font-weight: 650; letter-spacing: -.01em; line-height: 1.15; }
+  .kpi .k-delta { font-size: 12.5px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .up   { color: var(--pos); }
+  .down { color: var(--neg); }
+  .flat { color: var(--muted); }
+  .watchc { color: var(--warn); }
+
+  /* ---------- layout ---------- */
+  .grid { display: grid; grid-template-columns: minmax(0, 1.85fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+  .card {
+    background: var(--card); border: 1px solid var(--hair); border-radius: 12px;
+    box-shadow: var(--shadow); overflow: hidden;
+  }
+  .card-h {
+    display: flex; align-items: baseline; gap: 10px;
+    padding: 14px 18px 12px; border-bottom: 1px solid var(--hair);
+  }
+  .card-h h2 {
+    margin: 0; font-family: Georgia, serif; font-size: 17px; font-weight: 700; letter-spacing: .005em;
+  }
+  .card-h .hint { font-size: 12px; color: var(--muted); }
+  .card-h .right { margin-left: auto; font-size: 11.5px; color: var(--muted); }
+  .rail { display: grid; gap: 20px; min-width: 0; }
+
+  /* ---------- holdings board ---------- */
+  .board-scroll { overflow-x: auto; }
+  table.board { border-collapse: collapse; width: 100%; min-width: 770px; }
+  .board th {
+    font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); text-align: left; padding: 10px 8px 8px;
+    border-bottom: 1px solid var(--hair); white-space: nowrap;
+  }
+  .board th.num, .board td.num { text-align: right; }
+  .board td {
+    padding: 9px 8px; border-bottom: 1px solid var(--hair);
+    font-variant-numeric: tabular-nums; vertical-align: middle;
+  }
+  .board tbody tr.h-row:hover { background: var(--card-2); }
+  .board tr:last-child td { border-bottom: none; }
+  .rank { color: var(--muted); font-size: 12px; width: 22px; }
+  .h-name { font-weight: 650; font-size: 13.5px; line-height: 1.25; white-space: nowrap; }
+  .h-meta { font-size: 11px; color: var(--muted); margin-top: 1px; white-space: nowrap; }
+  .cc {
+    display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .06em;
+    color: var(--sec); background: var(--card-2); border: 1px solid var(--hair-strong);
+    border-radius: 4px; padding: 0 4px; margin-right: 5px; vertical-align: 1px;
+  }
+  .wcell { min-width: 88px; }
+  .wbar-track { background: var(--spark-grid); border-radius: 4px; height: 6px; margin-top: 4px; overflow: hidden; }
+  .wbar { background: var(--accent); border-radius: 4px; height: 6px; }
+  .wnum { font-size: 12.5px; font-weight: 600; }
+  .delta { font-weight: 650; font-size: 13px; white-space: nowrap; }
+  .spark-td { width: 84px; }
+  .spark { display: block; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; font-weight: 650; border-radius: 999px; padding: 2.5px 9px; white-space: nowrap;
+  }
+  .chip svg { flex: none; }
+  .chip-pos  { color: var(--pos);  background: var(--pos-soft); }
+  .chip-neg  { color: var(--neg);  background: var(--neg-soft); }
+  .chip-warn { color: var(--warn); background: var(--warn-soft); }
+  .chip-flat { color: var(--sec);  background: var(--card-2); border: 1px solid var(--hair); }
+  .flow { font-weight: 650; font-size: 12px; white-space: nowrap; }
+  .cat { font-size: 11.5px; color: var(--muted); line-height: 1.35; max-width: 92px; }
+  .cat strong { display: block; color: var(--ink); font-weight: 650; font-size: 12px; }
+
+  /* expanded row */
+  tr.expand > td {
+    background: var(--card-2); padding: 0; border-bottom: 1px solid var(--hair);
+  }
+  .expand-inner { padding: 14px 18px 16px 44px; border-left: 3px solid var(--neg-fill); }
+  .expand-inner h3 {
+    margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--neg);
+  }
+  .why { display: grid; grid-template-columns: 1.5fr 1fr; gap: 18px; }
+  .why > * { min-width: 0; }
+  .why ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+  .why li { font-size: 12.5px; color: var(--sec); line-height: 1.45; padding-left: 14px; position: relative; }
+  .why li::before { content: ""; position: absolute; left: 0; top: 7px; width: 5px; height: 5px; border-radius: 50%; background: var(--hair-strong); }
+  .why li strong { color: var(--ink); }
+  .src { font-size: 11px; color: var(--muted); }
+  .gauge-label { font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+  .gauge-track { position: relative; height: 8px; border-radius: 4px; overflow: hidden;
+    background: linear-gradient(90deg, var(--neg-fill), var(--warn-fill) 50%, var(--pos-fill)); opacity: .92; }
+  .gauge-pin { position: absolute; top: -3px; width: 3px; height: 14px; background: var(--ink); border-radius: 2px; }
+  .gauge-num { font-size: 20px; font-weight: 650; margin-top: 8px; }
+  .gauge-cap { font-size: 11px; color: var(--muted); }
+
+  /* ---------- signal feed ---------- */
+  .feed { list-style: none; margin: 0; padding: 6px 0; }
+  .feed li { display: grid; grid-template-columns: 52px 10px 1fr; gap: 10px; padding: 10px 18px; }
+  .feed li + li { border-top: 1px solid var(--hair); }
+  .feed .t { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; padding-top: 2px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 5px; }
+  .dot-pos { background: var(--pos-fill); } .dot-neg { background: var(--neg-fill); }
+  .dot-warn { background: var(--warn-fill); } .dot-flat { background: var(--hair-strong); }
+  .feed .txt { font-size: 12.5px; color: var(--sec); line-height: 1.45; min-width: 0; }
+  .feed .txt strong { color: var(--ink); font-weight: 650; }
+  .tag {
+    display: inline-block; font-size: 9.5px; font-weight: 700; letter-spacing: .08em;
+    color: var(--accent-ink); background: var(--accent-soft); border-radius: 4px;
+    padding: 1px 6px; margin-right: 6px; vertical-align: 1px;
+  }
+  .hchip {
+    display: inline-block; font-size: 10px; font-weight: 700; color: var(--sec);
+    background: var(--card-2); border: 1px solid var(--hair-strong); border-radius: 4px;
+    padding: 0 5px; margin: 4px 4px 0 0;
+  }
+
+  /* ---------- flows chart ---------- */
+  .flows { padding: 14px 18px 8px; }
+  .frow { display: grid; grid-template-columns: 128px 1fr 44px; gap: 10px; align-items: center; padding: 5px 0; }
+  .frow .fl { font-size: 12px; color: var(--sec); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .frow .fv { font-size: 12px; font-weight: 650; text-align: right; font-variant-numeric: tabular-nums; }
+  .ftrack { position: relative; height: 14px; }
+  .ftrack::before { content: ""; position: absolute; left: 50%; top: -3px; bottom: -3px; width: 1px; background: var(--hair-strong); }
+  .fbar { position: absolute; top: 2px; height: 10px; border-radius: 4px; }
+  .fbar.pos { left: 50%; background: var(--pos-fill); border-top-left-radius: 2px; border-bottom-left-radius: 2px; }
+  .fbar.neg { right: 50%; background: var(--neg-fill); border-top-right-radius: 2px; border-bottom-right-radius: 2px; }
+  .fnote { font-size: 11.5px; color: var(--muted); padding: 8px 18px 14px; line-height: 1.5; border-top: 1px dashed var(--hair); margin-top: 8px; }
+  .fnote strong { color: var(--sec); }
+
+  /* ---------- macro watch ---------- */
+  .macro { list-style: none; margin: 0; padding: 4px 0; }
+  .macro li { padding: 10px 18px; display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; }
+  .macro li + li { border-top: 1px solid var(--hair); }
+  .m-name { font-size: 12.5px; font-weight: 650; }
+  .m-read { font-size: 12.5px; font-weight: 650; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .m-why { grid-column: 1 / -1; font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+
+  /* ---------- calendar ---------- */
+  .cal { list-style: none; margin: 0; padding: 4px 0; }
+  .cal li { display: grid; grid-template-columns: 58px 1fr; gap: 12px; padding: 8px 18px; align-items: baseline; }
+  .cal li + li { border-top: 1px solid var(--hair); }
+  .cal .d { font-size: 11px; font-weight: 700; letter-spacing: .04em; color: var(--accent-ink); text-transform: uppercase; font-variant-numeric: tabular-nums; }
+  .cal .e { font-size: 12.5px; color: var(--sec); }
+  .cal .e strong { color: var(--ink); font-weight: 650; }
+
+  /* ---------- value strip ---------- */
+  .value-strip { margin-top: 26px; }
+  .vs-head {
+    font-family: Georgia, serif; font-size: 19px; font-weight: 700; margin: 0 0 4px;
+  }
+  .vs-sub { font-size: 13px; color: var(--sec); margin: 0 0 14px; max-width: 62ch; }
+  .vcards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  .vcard { background: var(--card); border: 1px solid var(--hair); border-left: 3px solid var(--accent); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow); }
+  .vcard h3 { margin: 0 0 6px; font-size: 13.5px; font-weight: 700; }
+  .vcard p { margin: 0; font-size: 12.5px; color: var(--sec); line-height: 1.55; }
+  .vcard .stat { font-size: 22px; font-weight: 650; color: var(--accent-ink); margin: 2px 0 6px; }
+
+  footer {
+    margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--hair);
+    font-size: 11px; color: var(--muted); line-height: 1.6; max-width: 100ch;
+  }
+
+  /* tooltip */
+  .tip {
+    position: fixed; z-index: 50; pointer-events: none; display: none;
+    background: var(--ink); color: var(--page); font-size: 11.5px; font-weight: 600;
+    padding: 5px 9px; border-radius: 6px; font-variant-numeric: tabular-nums;
+    box-shadow: 0 4px 14px rgba(0,0,0,.25); white-space: nowrap;
+  }
+
+  a:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .kpi, .card, .vcard { transition: border-color .15s ease; }
+    .board tbody tr.h-row { transition: background .12s ease; }
+  }
+  @media (max-width: 1080px) {
+    .kpis { grid-template-columns: repeat(3, 1fr); }
+    .grid { grid-template-columns: 1fr; }
+    .vcards { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 640px) {
+    .kpis { grid-template-columns: repeat(2, 1fr); }
+    .why { grid-template-columns: 1fr; }
+    .mast-meta { margin-left: 0; text-align: left; }
+  }
+</style>
+
+<div class="wrap">
+
+  <!-- ============ masthead ============ -->
+  <header class="masthead">
+    <div>
+      <div class="brand">Meridian<span class="tick">.</span></div>
+      <div class="brand-sub">The overnight brief, scoped to the book.</div>
+    </div>
+    <div class="mast-meta">
+      <div><strong>International Equity — Top-10 Holdings</strong></div>
+      <div>Product concept · prepared for E. Cohen by M.&nbsp;Sunderji</div>
+    </div>
+  </header>
+  <div class="dateline">
+    <span class="badge-live">Morning edition</span>
+    <span><strong style="color:var(--ink)">Wednesday, July 8, 2026</strong></span>
+    <span class="sep">·</span>
+    <span>Compiled 06:45 ET / 12:45 CET — 45 min before the U.S. open, Europe mid-session</span>
+    <span class="sep">·</span>
+    <span>Sources scanned overnight: 42 · New signals: <strong style="color:var(--ink)">6</strong> · Requires attention: <strong class="watchc">2</strong></span>
+  </div>
+
+  <!-- ============ KPI strip ============ -->
+  <section class="kpis" aria-label="Overnight pulse">
+    <div class="kpi">
+      <div class="k-label">Top-10 O/N contribution</div>
+      <div class="k-value up">+8.7 bp</div>
+      <div class="k-delta flat">7 of 10 holdings higher</div>
+    </div>
+    <div class="kpi">
+      <div class="k-label">Best / worst mover</div>
+      <div class="k-value" style="font-size:15px; line-height:1.5">
+        <span class="up">Siemens Energy +3.2%</span><br>
+        <span class="down">AB InBev −2.1%</span>
+      </div>
+    </div>
+    <div class="kpi">
+      <div class="k-label">STOXX Europe 600</div>
+      <div class="k-value">547.2</div>
+      <div class="k-delta up">▲ +0.6%</div>
+    </div>
+    <div class="kpi">
+      <div class="k-label">Nikkei 225 (close)</div>
+      <div class="k-value">41,880</div>
+      <div class="k-delta down">▼ −0.3%</div>
+    </div>
+    <div class="kpi">
+      <div class="k-label">EUR / USD</div>
+      <div class="k-value">1.1820</div>
+      <div class="k-delta up">▲ +0.3% <span class="flat" style="font-weight:500">— exporter watch</span></div>
+    </div>
+    <div class="kpi">
+      <div class="k-label">Bund 10-yr</div>
+      <div class="k-value">2.62%</div>
+      <div class="k-delta up">▲ +4 bp <span class="flat" style="font-weight:500">— banks tailwind</span></div>
+    </div>
+  </section>
+
+  <!-- ============ main grid ============ -->
+  <div class="grid">
+
+    <!-- ---------- holdings board ---------- -->
+    <section class="card" aria-label="Holdings board">
+      <div class="card-h">
+        <h2>Holdings Board</h2>
+        <span class="hint">top 10 · 19.2% of fund</span>
+        <span class="right">weights per latest disclosure · signals as of 06:45 ET</span>
+      </div>
+      <div class="board-scroll">
+        <table class="board">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Holding</th>
+              <th class="wcell">Weight</th>
+              <th class="num">O/N move</th>
+              <th>5-day</th>
+              <th>News pulse</th>
+              <th>Flows</th>
+              <th>Catalyst</th>
+            </tr>
+          </thead>
+          <tbody id="board-body"><!-- rows injected --></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ---------- right rail ---------- -->
+    <div class="rail">
+
+      <section class="card" aria-label="Signal feed">
+        <div class="card-h"><h2>Signal Feed</h2><span class="right">overnight · newest first</span></div>
+        <ul class="feed">
+          <li>
+            <span class="t">06:12 ET</span><span class="dot dot-neg"></span>
+            <div class="txt"><span class="tag">NEWS</span><strong>Heineken cuts H1 volume outlook;</strong> European brewers sold off in sympathy — AB InBev −2.1% in Brussels on 2.3× average volume.
+              <div><span class="hchip">ABI</span></div></div>
+          </li>
+          <li>
+            <span class="t">05:48 ET</span><span class="dot dot-pos"></span>
+            <div class="txt"><span class="tag">SELL-SIDE</span><strong>Two upgrades on German grid capex</strong> after TenneT's €14bn tender round; both notes name Siemens and Siemens Energy as primary beneficiaries.
+              <div><span class="hchip">SIE</span><span class="hchip">ENR</span></div></div>
+          </li>
+          <li>
+            <span class="t">05:30 ET</span><span class="dot dot-warn"></span>
+            <div class="txt"><span class="tag">POLICY</span><strong>U.S. drug-pricing executive order</strong> expected this week per Washington press; watch read-across to European pharma and med-tech with U.S. revenue.
+              <div><span class="hchip">AZN</span><span class="hchip">CTEC</span></div></div>
+          </li>
+          <li>
+            <span class="t">04:55 ET</span><span class="dot dot-pos"></span>
+            <div class="txt"><span class="tag">FLOWS</span><strong>Fourth straight week of inflows</strong> into eurozone bank ETFs (+€1.2bn); positioning still below the 5-yr average.
+              <div><span class="hchip">UCG</span><span class="hchip">ING</span><span class="hchip">EBS</span></div></div>
+          </li>
+          <li>
+            <span class="t">04:10 ET</span><span class="dot dot-pos"></span>
+            <div class="txt"><span class="tag">LOCAL</span><strong>Tokyo: July NISA rebalance</strong> skewing to industrials — Hitachi appears in the top-5 retail net-buy list for a third session.
+              <div><span class="hchip">6501</span></div></div>
+          </li>
+          <li>
+            <span class="t">03:40 ET</span><span class="dot dot-warn"></span>
+            <div class="txt"><span class="tag">POLICY</span><strong>Dutch coalition floats a bank levy</strong> in budget negotiations; early stage, but ING named in local coverage.
+              <div><span class="hchip">ING</span></div></div>
+          </li>
+        </ul>
+      </section>
+
+      <section class="card" aria-label="Local and regional flows">
+        <div class="card-h"><h2>Local &amp; Regional Flows</h2><span class="right">weekly net, $bn</span></div>
+        <div class="flows" id="flows"><!-- rows injected --></div>
+        <div class="fnote"><strong>Read:</strong> money keeps rotating into eurozone financials and Japan industrials — both overweight themes in the top 10 — while global healthcare saw a second week of redemptions ahead of the U.S. pricing order.</div>
+      </section>
+
+      <section class="card" aria-label="Macro watch">
+        <div class="card-h"><h2>Macro Watch</h2><span class="right">drivers mapped to holdings</span></div>
+        <ul class="macro">
+          <li>
+            <span class="m-name">EUR strength</span>
+            <span class="m-read up">1.1820 · +0.3%</span>
+            <span class="m-why">Translation headwind for exporters if it holds above 1.18 — <span class="hchip">SIE</span><span class="hchip">ENR</span><span class="hchip">ABI</span></span>
+          </li>
+          <li>
+            <span class="m-name">Bund 10-yr yield</span>
+            <span class="m-read up">2.62% · +4 bp</span>
+            <span class="m-why">Steeper curve supports NII momentum into Q2 prints — <span class="hchip">UCG</span><span class="hchip">ING</span><span class="hchip">EBS</span></span>
+          </li>
+          <li>
+            <span class="m-name">USD / JPY</span>
+            <span class="m-read down">152.8 · −0.4%</span>
+            <span class="m-why">Yen firming trims Hitachi's overseas translation; BoJ meets Jul 29 — <span class="hchip">6501</span></span>
+          </li>
+          <li>
+            <span class="m-name">China Caixin PMI</span>
+            <span class="m-read up">50.7 · beat</span>
+            <span class="m-why">Second month in expansion; supportive for automation &amp; grid orders — <span class="hchip">SIE</span><span class="hchip">6501</span></span>
+          </li>
+          <li>
+            <span class="m-name">Brent crude</span>
+            <span class="m-read down">$71.4 · −1.2%</span>
+            <span class="m-why">Input-cost relief for catering &amp; staples margins — <span class="hchip">CPG</span><span class="hchip">ABI</span></span>
+          </li>
+        </ul>
+      </section>
+
+      <section class="card" aria-label="Catalyst calendar">
+        <div class="card-h"><h2>Catalyst Calendar</h2><span class="right">next 4 weeks</span></div>
+        <ul class="cal">
+          <li><span class="d">Jul 16</span><span class="e"><strong>ECB rate decision</strong> — consensus: hold; bank NII guidance in focus <span class="hchip">UCG</span><span class="hchip">ING</span><span class="hchip">EBS</span></span></li>
+          <li><span class="d">Jul 21</span><span class="e"><strong>Compass Group</strong> Q3 trading update <span class="hchip">CPG</span></span></li>
+          <li><span class="d">Jul 23</span><span class="e"><strong>UniCredit</strong> Q2 results + buyback update <span class="hchip">UCG</span></span></li>
+          <li><span class="d">Jul 24</span><span class="e"><strong>AstraZeneca</strong> H1 results; oncology readout window opens <span class="hchip">AZN</span></span></li>
+          <li><span class="d">Jul 29</span><span class="e"><strong>Bank of Japan</strong> policy meeting — yen path for exporters <span class="hchip">6501</span></span></li>
+          <li><span class="d">Jul 31</span><span class="e"><strong>AB InBev</strong> H1 · <strong>ING</strong> Q2 — same morning <span class="hchip">ABI</span><span class="hchip">ING</span></span></li>
+          <li><span class="d">Aug 6</span><span class="e"><strong>Siemens</strong> fiscal Q3 results <span class="hchip">SIE</span></span></li>
+        </ul>
+      </section>
+
+    </div><!-- /rail -->
+  </div><!-- /grid -->
+
+  <!-- ============ value strip ============ -->
+  <section class="value-strip" aria-label="Why this adds value">
+    <h2 class="vs-head">Why this adds value</h2>
+    <p class="vs-sub">Generic market summaries cover the market. Meridian starts from the book — every signal above exists only because it touches a name you own or watch.</p>
+    <div class="vcards">
+      <div class="vcard">
+        <h3>One read before the open</h3>
+        <div class="stat">~90 seconds</div>
+        <p>Overnight price action, news, flows and macro across 40+ sources, collapsed into a single screen scoped to the top 10 and the interest list — instead of six terminals and four inboxes.</p>
+      </div>
+      <div class="vcard">
+        <h3>Second-order signals</h3>
+        <div class="stat">Peer &amp; policy read-across</div>
+        <p>The AB InBev move above came from a <em>competitor's</em> warning — the kind of sympathy signal standard price alerts miss. Meridian maps peers, suppliers and policy chatter to each holding.</p>
+      </div>
+      <div class="vcard">
+        <h3>Nothing sneaks up</h3>
+        <div class="stat">Every name → next event</div>
+        <p>Each position carries its live flow direction and next catalyst. Watch-list names get the same treatment, so entry ideas arrive with the context already attached.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <strong>Concept mockup — for discussion only.</strong> Top-10 holdings and weights are drawn from the fund's latest public disclosures; all market moves, news items, flow figures, sentiment scores and calendar entries on this page are illustrative sample data created to demonstrate the product format. Nothing here is investment advice or a recommendation. Prepared by M. Sunderji, July 2026.
+  </footer>
+
+</div>
+
+<div class="tip" id="tip" role="status" aria-hidden="true"></div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- data (illustrative) ---------- */
+  var holdings = [
+    { n: "Siemens AG", t: "SIE", cc: "DE", sec: "Industrials", w: 2.19, on: 1.4,
+      spark: [100,100.6,99.8,100.9,101.5,101.1,102.0,102.6,102.2,103.1,103.6,104.4],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Aug 6", "Q3 results"] },
+    { n: "Anheuser-Busch InBev", t: "ABI", cc: "BE", sec: "Consumer Staples", w: 2.17, on: -2.1,
+      spark: [100,100.3,100.1,99.6,99.9,99.2,99.5,98.8,99.1,98.4,98.0,96.2],
+      pulse: ["neg", "Negative"], flow: ["neg", "▼ Outflows"], cat: ["Jul 31", "H1 results"], expand: true },
+    { n: "UniCredit S.p.A.", t: "UCG", cc: "IT", sec: "Financials", w: 2.07, on: 0.8,
+      spark: [100,101.2,101.8,101.4,102.5,103.0,102.6,103.8,104.2,104.9,105.4,106.1],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Jul 23", "Q2 + buyback"] },
+    { n: "ConvaTec Group", t: "CTEC", cc: "GB", sec: "Health Care", w: 1.90, on: -0.4,
+      spark: [100,100.2,99.9,100.4,100.1,100.6,100.3,100.0,100.5,100.2,100.4,100.0],
+      pulse: ["warn", "Watch"], flow: ["flat", "— Neutral"], cat: ["This wk", "US pricing EO"] },
+    { n: "Siemens Energy", t: "ENR", cc: "DE", sec: "Industrials", w: 1.86, on: 3.2,
+      spark: [100,101.5,102.8,102.2,103.9,105.1,104.6,106.3,107.5,108.2,109.8,113.3],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Aug 8", "Q3 results"] },
+    { n: "Hitachi, Ltd.", t: "6501", cc: "JP", sec: "Industrials", w: 1.85, on: 1.1,
+      spark: [100,100.8,101.3,100.9,101.8,102.4,102.0,102.9,103.5,103.1,104.0,105.1],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Retail bid"], cat: ["Jul 29", "BoJ meeting"] },
+    { n: "AstraZeneca", t: "AZN", cc: "GB", sec: "Health Care", w: 1.84, on: -1.8,
+      spark: [100,100.4,101.0,100.6,100.2,100.8,100.3,99.7,100.1,99.4,99.8,98.0],
+      pulse: ["warn", "Watch"], flow: ["neg", "▼ Outflows"], cat: ["Jul 24", "H1 + readout"] },
+    { n: "ING Groep", t: "ING", cc: "NL", sec: "Financials", w: 1.80, on: 0.5,
+      spark: [100,100.5,100.9,101.4,101.1,101.8,102.3,102.0,102.6,103.1,102.8,103.3],
+      pulse: ["warn", "Watch"], flow: ["pos", "▲ Inflows"], cat: ["Jul 31", "Q2 results"] },
+    { n: "Compass Group", t: "CPG", cc: "GB", sec: "Consumer Disc.", w: 1.79, on: 0.2,
+      spark: [100,100.1,100.4,100.2,100.6,100.3,100.7,100.9,100.6,101.0,100.8,101.0],
+      pulse: ["flat", "Quiet"], flow: ["flat", "— Neutral"], cat: ["Jul 21", "Q3 update"] },
+    { n: "Erste Group Bank", t: "EBS", cc: "AT", sec: "Financials", w: 1.76, on: 1.9,
+      spark: [100,100.9,101.6,102.2,101.8,102.9,103.5,104.1,103.8,104.9,105.6,107.6],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Aug 1", "H1 results"] }
+  ];
+
+  var maxW = 2.19;
+
+  var pulseIcon = {
+    pos:  '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1 9 7H1z" fill="currentColor"/></svg>',
+    neg:  '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 9 1 3h8z" fill="currentColor"/></svg>',
+    warn: '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><circle cx="5" cy="5" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 2.8v2.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="5" cy="7.2" r=".8" fill="currentColor"/></svg>',
+    flat: '<svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M1.5 5h7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>'
+  };
+
+  function esc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;"); }
+
+  function sparkSvg(data, dir, name) {
+    var w = 80, h = 26, pad = 2;
+    var min = Math.min.apply(null, data), max = Math.max.apply(null, data);
+    var span = (max - min) || 1;
+    var pts = data.map(function (v, i) {
+      var x = pad + i * (w - 2 * pad) / (data.length - 1);
+      var y = pad + (1 - (v - min) / span) * (h - 2 * pad);
+      return [x.toFixed(1), y.toFixed(1)];
+    });
+    var line = pts.map(function (p) { return p.join(","); }).join(" ");
+    var last = pts[pts.length - 1];
+    var col = dir >= 0 ? "var(--pos-fill)" : "var(--neg-fill)";
+    var chg = (data[data.length - 1] - data[0]).toFixed(1);
+    return '<svg class="spark" width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '" role="img" ' +
+      'aria-label="' + esc(name) + ' 5-day trend, ' + (chg >= 0 ? "+" : "") + chg + ' percent" ' +
+      'data-tip="' + esc(name) + ' · 5-day ' + (chg >= 0 ? "+" : "") + chg + '%">' +
+      '<line x1="' + pad + '" y1="' + (h / 2) + '" x2="' + (w - pad) + '" y2="' + (h / 2) + '" stroke="var(--spark-grid)" stroke-width="1"/>' +
+      '<polyline points="' + line + '" fill="none" stroke="' + col + '" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>' +
+      '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="2.6" fill="' + col + '" stroke="var(--card)" stroke-width="1.5"/>' +
+      '</svg>';
+  }
+
+  /* ---------- holdings board ---------- */
+  var tb = document.getElementById("board-body");
+  var rows = "";
+  holdings.forEach(function (hld, i) {
+    var d = hld.on;
+    var dcls = d > 0.05 ? "up" : (d < -0.05 ? "down" : "flat");
+    var dtxt = (d > 0 ? "▲ +" : d < 0 ? "▼ −" : "· ") + Math.abs(d).toFixed(1) + "%";
+    rows +=
+      '<tr class="h-row">' +
+      '<td class="rank">' + (i + 1) + "</td>" +
+      '<td><div class="h-name">' + esc(hld.n) + '</div>' +
+      '<div class="h-meta"><span class="cc">' + hld.cc + "</span>" + esc(hld.t) + " · " + esc(hld.sec) + "</div></td>" +
+      '<td class="wcell"><span class="wnum">' + hld.w.toFixed(2) + '%</span>' +
+      '<div class="wbar-track"><div class="wbar" style="width:' + (hld.w / maxW * 100).toFixed(0) + '%"></div></div></td>' +
+      '<td class="num"><span class="delta ' + dcls + '">' + dtxt + "</span></td>" +
+      '<td class="spark-td">' + sparkSvg(hld.spark, d, hld.n) + "</td>" +
+      '<td><span class="chip chip-' + hld.pulse[0] + '">' + pulseIcon[hld.pulse[0]] + hld.pulse[1] + "</span></td>" +
+      '<td><span class="flow ' + (hld.flow[0] === "pos" ? "up" : hld.flow[0] === "neg" ? "down" : "flat") + '">' + hld.flow[1] + "</span></td>" +
+      '<td class="cat"><strong>' + hld.cat[0] + "</strong>" + hld.cat[1] + "</td>" +
+      "</tr>";
+
+    if (hld.expand) {
+      rows +=
+        '<tr class="expand"><td colspan="8"><div class="expand-inner">' +
+        "<h3>Why it moved — AB InBev −2.1%</h3>" +
+        '<div class="why"><ul>' +
+        "<li><strong>Sympathy, not company news:</strong> Heineken cut its H1 volume outlook at 05:55 CET; the whole European brewing complex re-rated within 20 minutes. No ABI-specific disclosure. <span class=\"src\">Bloomberg · Het Financieele Dagblad</span></li>" +
+        "<li><strong>Positioning context:</strong> consensus has been rebuilding longs in EU staples for 5 weeks — crowded enough that a peer warning travels. <span class=\"src\">Prime-broker positioning survey, Jul 3</span></li>" +
+        "<li><strong>What would change the picture:</strong> ABI's own H1 print (Jul 31) — U.S. volumes lap easy comparisons and consensus already models Europe soft.</li>" +
+        "</ul>" +
+        '<div><div class="gauge-label">News sentiment · 24h</div>' +
+        '<div class="gauge-track"><div class="gauge-pin" style="left:34%"></div></div>' +
+        '<div class="gauge-num down">34<span style="font-size:12px;color:var(--muted);font-weight:500"> / 100</span></div>' +
+        '<div class="gauge-cap">12 stories · skews negative — one peer event</div></div>' +
+        "</div></div></td></tr>";
+    }
+  });
+  tb.innerHTML = rows;
+
+  /* ---------- flows chart ---------- */
+  var flows = [
+    ["Eurozone equity", 2.4],
+    ["Eurozone banks", 1.2],
+    ["Japan equity", 1.1],
+    ["EM equity", 0.3],
+    ["UK equity", -0.6],
+    ["Global healthcare", -0.9]
+  ];
+  var fmax = 2.4;
+  var fhtml = "";
+  flows.forEach(function (f) {
+    var v = f[1];
+    var pct = Math.abs(v) / fmax * 48;
+    var cls = v >= 0 ? "pos" : "neg";
+    fhtml +=
+      '<div class="frow" data-tip="' + esc(f[0]) + " · " + (v >= 0 ? "+" : "−") + "$" + Math.abs(v).toFixed(1) + 'bn this week">' +
+      '<span class="fl">' + esc(f[0]) + "</span>" +
+      '<span class="ftrack"><span class="fbar ' + cls + '" style="width:' + pct.toFixed(1) + '%"></span></span>' +
+      '<span class="fv ' + (v >= 0 ? "up" : "down") + '">' + (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "</span>" +
+      "</div>";
+  });
+  document.getElementById("flows").innerHTML = fhtml;
+
+  /* ---------- tooltip ---------- */
+  var tip = document.getElementById("tip");
+  document.addEventListener("mousemove", function (e) {
+    var el = e.target.closest("[data-tip]");
+    if (el) {
+      tip.textContent = el.getAttribute("data-tip");
+      tip.style.display = "block";
+      var x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+      tip.style.left = x + "px";
+      tip.style.top = (e.clientY - 34) + "px";
+    } else {
+      tip.style.display = "none";
+    }
+  });
+})();
+</script>
