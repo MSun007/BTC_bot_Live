@@ -111,6 +111,23 @@
     border-radius: 999px; padding: 3px 10px;
   }
   .badge-live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .btn-print {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+    font: 600 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--accent-ink); background: none; border: 1px solid var(--hair-strong);
+    border-radius: 7px; padding: 6px 12px; cursor: pointer;
+  }
+  .btn-print:hover { background: var(--accent-soft); border-color: var(--accent); }
+
+  /* ---------- board tabs ---------- */
+  .tabs { display: inline-flex; background: var(--card-2); border: 1px solid var(--hair); border-radius: 8px; padding: 2px; gap: 2px; }
+  .tab {
+    font: 650 12px/1 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--sec); background: none; border: none; border-radius: 6px;
+    padding: 5px 12px; cursor: pointer; white-space: nowrap;
+  }
+  .tab[aria-pressed="true"] { color: var(--accent-ink); background: var(--card); box-shadow: 0 1px 2px rgba(18,24,30,.12); }
+  .tab:hover:not([aria-pressed="true"]) { color: var(--ink); }
 
   /* ---------- KPI strip ---------- */
   .kpis {
@@ -200,6 +217,8 @@
     margin: 0 0 8px; font-size: 11px; font-weight: 700; letter-spacing: .09em;
     text-transform: uppercase; color: var(--neg);
   }
+  .expand-inner.thesis { border-left-color: var(--accent); }
+  .expand-inner.thesis h3 { color: var(--accent-ink); }
   .why { display: grid; grid-template-columns: 1.5fr 1fr; gap: 18px; }
   .why > * { min-width: 0; }
   .why ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
@@ -304,6 +323,31 @@
     .why { grid-template-columns: 1fr; }
     .mast-meta { margin-left: 0; text-align: left; }
   }
+
+  /* ---------- one-page PDF export ---------- */
+  @media print {
+    :root, :root[data-theme="dark"] {
+      --page: #ffffff; --card: #ffffff; --card-2: #f4f6f7; --ink: #12181e;
+      --sec: #4a5560; --muted: #7d8790; --hair: #d8dde0; --hair-strong: #c2c9cd;
+      --accent: #1b4e8c; --accent-ink: #1b4e8c; --accent-soft: #e3ecf6;
+      --pos: #0a7a34; --pos-fill: #17a24f; --pos-soft: #e3f2e8;
+      --neg: #c03434; --neg-fill: #d64545; --neg-soft: #f9e8e8;
+      --warn: #8f640e; --warn-fill: #e8a91d; --warn-soft: #f8efdc;
+      --spark-grid: #e8ebec; --shadow: none;
+    }
+    body { background: #fff; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .wrap { zoom: .68; max-width: none; padding: 0; }
+    .btn-print, .tabs, .tip, .value-strip,
+    .rail section:not(.print-keep) { display: none !important; }
+    .kpi, .card, .vcard { box-shadow: none; }
+    .grid { display: block; }
+    .rail section.print-keep { margin-top: 16px; }
+    .cal { column-count: 2; column-gap: 0; padding: 4px 0; }
+    .cal li { break-inside: avoid; }
+    .card, .kpis { break-inside: avoid; }
+    tr.expand { display: none; }
+    footer { margin-top: 14px; }
+  }
 </style>
 
 <div class="wrap">
@@ -326,6 +370,10 @@
     <span>Compiled 06:45 ET / 12:45 CET — 45 min before the U.S. open, Europe mid-session</span>
     <span class="sep">·</span>
     <span>Sources scanned overnight: 42 · New signals: <strong style="color:var(--ink)">6</strong> · Requires attention: <strong class="watchc">2</strong></span>
+    <button class="btn-print" type="button" onclick="window.print()" title="Print-optimized one-page layout: pulse, board and catalysts">
+      <svg width="12" height="12" viewBox="0 0 14 14" aria-hidden="true"><path d="M3.5 1h7v3h-7zM2 4.5h10a1 1 0 0 1 1 1V10h-2.5v3h-7v-3H1V5.5a1 1 0 0 1 1-1zm2.5 5.5h5v2.5h-5z" fill="none" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/></svg>
+      Export one-page PDF
+    </button>
   </div>
 
   <!-- ============ KPI strip ============ -->
@@ -371,8 +419,12 @@
     <section class="card" aria-label="Holdings board">
       <div class="card-h">
         <h2>Holdings Board</h2>
-        <span class="hint">top 10 · 19.2% of fund</span>
-        <span class="right">weights per latest disclosure · signals as of 06:45 ET</span>
+        <div class="tabs" role="group" aria-label="Board view">
+          <button class="tab" type="button" data-mode="top10" aria-pressed="true">Top 10</button>
+          <button class="tab" type="button" data-mode="watch" aria-pressed="false">Interest list</button>
+        </div>
+        <span class="hint" id="board-hint">19.2% of fund</span>
+        <span class="right" id="board-note">weights per latest disclosure · signals as of 06:45 ET</span>
       </div>
       <div class="board-scroll">
         <table class="board">
@@ -380,7 +432,7 @@
             <tr>
               <th></th>
               <th>Holding</th>
-              <th class="wcell">Weight</th>
+              <th class="wcell" id="col2-head">Weight</th>
               <th class="num">O/N move</th>
               <th>5-day</th>
               <th>News pulse</th>
@@ -469,7 +521,7 @@
         </ul>
       </section>
 
-      <section class="card" aria-label="Catalyst calendar">
+      <section class="card print-keep" aria-label="Catalyst calendar">
         <div class="card-h"><h2>Catalyst Calendar</h2><span class="right">next 4 weeks</span></div>
         <ul class="cal">
           <li><span class="d">Jul 16</span><span class="e"><strong>ECB rate decision</strong> — consensus: hold; bank NII guidance in focus <span class="hchip">UCG</span><span class="hchip">ING</span><span class="hchip">EBS</span></span></li>
@@ -587,44 +639,107 @@
       '</svg>';
   }
 
+  /* ---------- interest list (illustrative) ---------- */
+  var watchlist = [
+    { n: "Schneider Electric", t: "SU", cc: "FR", sec: "Industrials", trig: "< €215", added: "watching since May", on: 0.9,
+      spark: [100,100.7,101.4,101.0,101.9,102.5,102.2,103.0,103.6,103.2,104.1,105.0],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Jul 30", "H1 results"], expand: "thesis" },
+    { n: "SAP SE", t: "SAP", cc: "DE", sec: "Info Tech", trig: "< €230", added: "watching since Jun", on: -0.6,
+      spark: [100,100.3,99.8,100.2,99.6,100.0,99.4,99.8,99.2,99.6,99.0,98.4],
+      pulse: ["warn", "Watch"], flow: ["flat", "— Neutral"], cat: ["Jul 22", "Q2 results"] },
+    { n: "London Stock Exch.", t: "LSEG", cc: "GB", sec: "Financials", trig: "post-CMD", added: "watching since Apr", on: 0.4,
+      spark: [100,100.2,100.5,100.3,100.7,100.4,100.8,101.1,100.9,101.2,101.0,101.4],
+      pulse: ["flat", "Quiet"], flow: ["flat", "— Neutral"], cat: ["Jul 31", "H1 results"] },
+    { n: "Recruit Holdings", t: "6098", cc: "JP", sec: "Industrials", trig: "< ¥8,400", added: "watching since Jun", on: 1.3,
+      spark: [100,100.6,101.2,100.8,101.5,102.1,101.8,102.6,103.2,102.9,103.8,105.1],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Aug 8", "Q1 results"] },
+    { n: "Ferrari N.V.", t: "RACE", cc: "IT", sec: "Consumer Disc.", trig: "< €380", added: "watching since Mar", on: -1.1,
+      spark: [100,100.4,100.0,100.6,100.2,99.7,100.1,99.5,99.9,99.3,98.8,97.7],
+      pulse: ["warn", "Watch"], flow: ["neg", "▼ Outflows"], cat: ["Aug 4", "Q2 results"] },
+    { n: "Adyen N.V.", t: "ADYEN", cc: "NL", sec: "Financials", trig: "< €1,450", added: "watching since May", on: 2.0,
+      spark: [100,101.1,100.6,101.8,102.4,101.9,103.0,103.8,103.3,104.5,105.2,107.2],
+      pulse: ["pos", "Positive"], flow: ["pos", "▲ Inflows"], cat: ["Aug 20", "H1 results"] }
+  ];
+
+  var abiExpand =
+    '<tr class="expand"><td colspan="8"><div class="expand-inner">' +
+    "<h3>Why it moved — AB InBev −2.1%</h3>" +
+    '<div class="why"><ul>' +
+    "<li><strong>Sympathy, not company news:</strong> Heineken cut its H1 volume outlook at 05:55 CET; the whole European brewing complex re-rated within 20 minutes. No ABI-specific disclosure. <span class=\"src\">Bloomberg · Het Financieele Dagblad</span></li>" +
+    "<li><strong>Positioning context:</strong> consensus has been rebuilding longs in EU staples for 5 weeks — crowded enough that a peer warning travels. <span class=\"src\">Prime-broker positioning survey, Jul 3</span></li>" +
+    "<li><strong>What would change the picture:</strong> ABI's own H1 print (Jul 31) — U.S. volumes lap easy comparisons and consensus already models Europe soft.</li>" +
+    "</ul>" +
+    '<div><div class="gauge-label">News sentiment · 24h</div>' +
+    '<div class="gauge-track"><div class="gauge-pin" style="left:34%"></div></div>' +
+    '<div class="gauge-num down">34<span style="font-size:12px;color:var(--muted);font-weight:500"> / 100</span></div>' +
+    '<div class="gauge-cap">12 stories · skews negative — one peer event</div></div>' +
+    "</div></div></td></tr>";
+
+  var suExpand =
+    '<tr class="expand"><td colspan="8"><div class="expand-inner thesis">' +
+    "<h3>Set-up — Schneider Electric, approaching entry</h3>" +
+    '<div class="why"><ul>' +
+    "<li><strong>Why it's on the list:</strong> same grid-electrification thesis as the Siemens / Siemens Energy positions, with higher software mix — but it has run 18% since April and sits above the €215 entry level.</li>" +
+    "<li><strong>What could open the door:</strong> H1 print on Jul 30 — any margin wobble on North American data-center timing has historically given a 5–8% pullback window.</li>" +
+    "<li><strong>Overlap check:</strong> adding it would take combined electrification exposure in the top 10 to ~6% — flagged so sizing is a decision, not a surprise.</li>" +
+    "</ul>" +
+    '<div><div class="gauge-label">News sentiment · 24h</div>' +
+    '<div class="gauge-track"><div class="gauge-pin" style="left:72%"></div></div>' +
+    '<div class="gauge-num up">72<span style="font-size:12px;color:var(--muted);font-weight:500"> / 100</span></div>' +
+    '<div class="gauge-cap">9 stories · skews positive — grid-capex upgrades</div></div>' +
+    "</div></div></td></tr>";
+
   /* ---------- holdings board ---------- */
   var tb = document.getElementById("board-body");
-  var rows = "";
-  holdings.forEach(function (hld, i) {
+
+  function rowHtml(hld, i, mode) {
     var d = hld.on;
     var dcls = d > 0.05 ? "up" : (d < -0.05 ? "down" : "flat");
     var dtxt = (d > 0 ? "▲ +" : d < 0 ? "▼ −" : "· ") + Math.abs(d).toFixed(1) + "%";
-    rows +=
-      '<tr class="h-row">' +
+    var col2 = mode === "top10"
+      ? '<td class="wcell"><span class="wnum">' + hld.w.toFixed(2) + '%</span>' +
+        '<div class="wbar-track"><div class="wbar" style="width:' + (hld.w / maxW * 100).toFixed(0) + '%"></div></div></td>'
+      : '<td class="wcell"><span class="wnum">' + esc(hld.trig) + '</span>' +
+        '<div class="h-meta">' + esc(hld.added) + "</div></td>";
+    return '<tr class="h-row">' +
       '<td class="rank">' + (i + 1) + "</td>" +
       '<td><div class="h-name">' + esc(hld.n) + '</div>' +
       '<div class="h-meta"><span class="cc">' + hld.cc + "</span>" + esc(hld.t) + " · " + esc(hld.sec) + "</div></td>" +
-      '<td class="wcell"><span class="wnum">' + hld.w.toFixed(2) + '%</span>' +
-      '<div class="wbar-track"><div class="wbar" style="width:' + (hld.w / maxW * 100).toFixed(0) + '%"></div></div></td>' +
+      col2 +
       '<td class="num"><span class="delta ' + dcls + '">' + dtxt + "</span></td>" +
       '<td class="spark-td">' + sparkSvg(hld.spark, d, hld.n) + "</td>" +
       '<td><span class="chip chip-' + hld.pulse[0] + '">' + pulseIcon[hld.pulse[0]] + hld.pulse[1] + "</span></td>" +
       '<td><span class="flow ' + (hld.flow[0] === "pos" ? "up" : hld.flow[0] === "neg" ? "down" : "flat") + '">' + hld.flow[1] + "</span></td>" +
       '<td class="cat"><strong>' + hld.cat[0] + "</strong>" + hld.cat[1] + "</td>" +
       "</tr>";
+  }
 
-    if (hld.expand) {
-      rows +=
-        '<tr class="expand"><td colspan="8"><div class="expand-inner">' +
-        "<h3>Why it moved — AB InBev −2.1%</h3>" +
-        '<div class="why"><ul>' +
-        "<li><strong>Sympathy, not company news:</strong> Heineken cut its H1 volume outlook at 05:55 CET; the whole European brewing complex re-rated within 20 minutes. No ABI-specific disclosure. <span class=\"src\">Bloomberg · Het Financieele Dagblad</span></li>" +
-        "<li><strong>Positioning context:</strong> consensus has been rebuilding longs in EU staples for 5 weeks — crowded enough that a peer warning travels. <span class=\"src\">Prime-broker positioning survey, Jul 3</span></li>" +
-        "<li><strong>What would change the picture:</strong> ABI's own H1 print (Jul 31) — U.S. volumes lap easy comparisons and consensus already models Europe soft.</li>" +
-        "</ul>" +
-        '<div><div class="gauge-label">News sentiment · 24h</div>' +
-        '<div class="gauge-track"><div class="gauge-pin" style="left:34%"></div></div>' +
-        '<div class="gauge-num down">34<span style="font-size:12px;color:var(--muted);font-weight:500"> / 100</span></div>' +
-        '<div class="gauge-cap">12 stories · skews negative — one peer event</div></div>' +
-        "</div></div></td></tr>";
-    }
+  function renderBoard(mode) {
+    var list = mode === "top10" ? holdings : watchlist;
+    var rows = "";
+    list.forEach(function (hld, i) {
+      rows += rowHtml(hld, i, mode);
+      if (hld.expand === true) rows += abiExpand;
+      if (hld.expand === "thesis") rows += suExpand;
+    });
+    tb.innerHTML = rows;
+    document.getElementById("col2-head").textContent = mode === "top10" ? "Weight" : "Entry level";
+    document.getElementById("board-hint").textContent = mode === "top10" ? "19.2% of fund" : "6 names · entry levels set";
+    document.getElementById("board-note").textContent = mode === "top10"
+      ? "weights per latest disclosure · signals as of 06:45 ET"
+      : "not held · same signal coverage as the book";
+  }
+
+  renderBoard("top10");
+
+  document.querySelectorAll(".tab").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.querySelectorAll(".tab").forEach(function (b) {
+        b.setAttribute("aria-pressed", b === btn ? "true" : "false");
+      });
+      renderBoard(btn.getAttribute("data-mode"));
+    });
   });
-  tb.innerHTML = rows;
 
   /* ---------- flows chart ---------- */
   var flows = [
