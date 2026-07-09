@@ -1,0 +1,291 @@
+<title>International Fund Signal Map</title>
+<style>
+  /* Committed single-theme design: clean white ground, charcoal ink,
+     green/red/amber reserved for signal state. */
+  :root {
+    --page: #ffffff;
+    --ink: #16191d;
+    --sec: #4d565f;
+    --muted: #838b93;
+    --hair: #e6e9ea;
+    --hair-strong: #d3d8db;
+    --wash: #f7f8f8;
+    --pos: #0a7a34;
+    --pos-fill: #17a24f;
+    --pos-soft: #e9f5ee;
+    --neg: #c03434;
+    --neg-fill: #d64545;
+    --neg-soft: #faeaea;
+    --amber: #8f640e;
+    --amber-fill: #e8a91d;
+    --amber-soft: #faf1dd;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 0 32px 64px; }
+
+  /* ---------- banner ---------- */
+  .banner { padding: 30px 0 22px; border-bottom: 1px solid var(--ink); }
+  .banner-top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 24px; }
+  .banner h1 {
+    margin: 0; font-size: 26px; font-weight: 700; letter-spacing: -.015em;
+  }
+  .banner .eyebrow {
+    display: block; font-size: 11px; font-weight: 700; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 6px;
+  }
+  .banner-meta { margin-left: auto; text-align: right; font-size: 12.5px; color: var(--sec); line-height: 1.6; }
+  .banner-meta strong { color: var(--ink); font-weight: 650; }
+
+  .statusbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px 26px;
+    margin-top: 20px;
+  }
+  .signal-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+  .sig {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em;
+    color: var(--sec); border: 1px solid var(--hair-strong);
+    border-radius: 999px; padding: 4px 10px 4px 7px; font-variant-numeric: tabular-nums;
+  }
+  .sig i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .sig-pos i { background: var(--pos-fill); }
+  .sig-neg i { background: var(--neg-fill); }
+  .sig-amb i { background: var(--amber-fill); }
+  .legend { margin-left: auto; display: flex; gap: 18px; font-size: 12px; color: var(--sec); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+  .legend i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+  .legend .lp i { background: var(--pos-fill); }
+  .legend .ln i { background: var(--neg-fill); }
+  .legend .la i { background: var(--amber-fill); }
+
+  /* ---------- layout ---------- */
+  .layout { display: grid; grid-template-columns: 264px minmax(0, 1fr); gap: 40px; padding-top: 34px; }
+
+  /* ---------- left column ---------- */
+  .side h2, .center h2 {
+    margin: 0 0 4px; font-size: 12px; font-weight: 700; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--ink);
+  }
+  .side .sub, .center .sub { font-size: 12px; color: var(--muted); margin: 0 0 18px; }
+  .holdings { list-style: none; margin: 0; padding: 0; }
+  .holdings li {
+    display: grid; grid-template-columns: 18px 1fr auto; gap: 10px; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid var(--hair);
+  }
+  .holdings .r { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .holdings .n { font-size: 13px; font-weight: 600; }
+  .holdings .n small { display: block; font-size: 11px; font-weight: 500; color: var(--muted); margin-top: 1px; }
+  .holdings .w { font-size: 13px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .holdings .bar { grid-column: 2 / -1; height: 4px; border-radius: 2px; background: var(--wash); margin-top: 2px; overflow: hidden; }
+  .holdings .bar b { display: block; height: 4px; border-radius: 2px; background: var(--ink); }
+  .side-total {
+    display: flex; justify-content: space-between; padding: 12px 0 0;
+    font-size: 12.5px; color: var(--sec); font-weight: 600;
+  }
+  .side-total strong { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .side-note { margin-top: 26px; padding: 14px 16px; background: var(--wash); border-radius: 8px; font-size: 12px; color: var(--sec); line-height: 1.6; }
+  .side-note strong { color: var(--ink); }
+
+  /* ---------- card grid ---------- */
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(292px, 1fr)); gap: 18px; }
+  .cardx {
+    border: 1px solid var(--hair); border-radius: 10px; background: var(--page);
+    padding: 18px 20px 16px; position: relative; overflow: hidden;
+    display: flex; flex-direction: column; gap: 12px;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  .cardx::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 3px; }
+  .cardx.is-pos::before { background: var(--pos-fill); }
+  .cardx.is-neg::before { background: var(--neg-fill); }
+  .cardx.is-amb::before { background: var(--amber-fill); }
+  .cardx:hover { border-color: var(--hair-strong); box-shadow: 0 6px 20px rgba(22,25,29,.07); }
+
+  .cx-top { display: flex; align-items: flex-start; gap: 12px; }
+  .cx-name { font-size: 15.5px; font-weight: 700; letter-spacing: -.01em; line-height: 1.25; }
+  .cx-meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+  .pill {
+    margin-left: auto; flex: none; font-size: 13px; font-weight: 700;
+    border-radius: 999px; padding: 4px 11px; font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  .pill-pos { color: var(--pos); background: var(--pos-soft); }
+  .pill-neg { color: var(--neg); background: var(--neg-soft); }
+  .pill-amb { color: var(--amber); background: var(--amber-soft); }
+
+  .cx-head { font-size: 12.5px; color: var(--sec); line-height: 1.5; min-height: 3em; }
+  .cx-head b { color: var(--ink); font-weight: 650; }
+  .cx-head .src { color: var(--muted); font-size: 11px; font-weight: 500; }
+
+  .cx-rows { display: grid; gap: 7px; border-top: 1px solid var(--hair); padding-top: 12px; }
+  .cx-row { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+  .cx-row .lbl {
+    flex: none; width: 74px; font-size: 10px; font-weight: 700; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .cx-row .val { color: var(--sec); font-weight: 600; }
+  .cx-row .val.up { color: var(--pos); }
+  .cx-row .val.down { color: var(--neg); }
+  .cx-row .val.hold { color: var(--amber); }
+  .tagm {
+    display: inline-block; font-size: 11px; font-weight: 650; color: var(--sec);
+    background: var(--wash); border: 1px solid var(--hair); border-radius: 5px; padding: 2px 8px;
+  }
+
+  footer {
+    margin-top: 48px; padding-top: 16px; border-top: 1px solid var(--hair);
+    font-size: 11px; color: var(--muted); line-height: 1.65; max-width: 105ch;
+  }
+  footer strong { color: var(--sec); }
+
+  @media (max-width: 980px) {
+    .layout { grid-template-columns: 1fr; gap: 28px; }
+    .banner-meta { margin-left: 0; text-align: left; }
+    .legend { margin-left: 0; }
+  }
+</style>
+
+<div class="wrap">
+
+  <!-- ================= banner ================= -->
+  <header class="banner">
+    <div class="banner-top">
+      <div>
+        <span class="eyebrow">International Equity · Research &amp; Monitoring</span>
+        <h1>International Fund Signal Map</h1>
+      </div>
+      <div class="banner-meta">
+        <div><strong>Wednesday, July 8, 2026</strong> · compiled 06:45 ET</div>
+        <div>Top-10 holdings · news, local flows &amp; macro, one screen</div>
+      </div>
+    </div>
+    <div class="statusbar">
+      <div class="signal-strip" role="list" aria-label="Holding status indicators">
+        <span class="sig sig-pos" role="listitem"><i></i>SIE</span>
+        <span class="sig sig-pos" role="listitem"><i></i>ENR</span>
+        <span class="sig sig-amb" role="listitem"><i></i>CTEC</span>
+        <span class="sig sig-pos" role="listitem"><i></i>6501</span>
+        <span class="sig sig-neg" role="listitem"><i></i>ABI</span>
+        <span class="sig sig-neg" role="listitem"><i></i>AZN</span>
+        <span class="sig sig-pos" role="listitem"><i></i>NWG</span>
+        <span class="sig sig-pos" role="listitem"><i></i>EBS</span>
+        <span class="sig sig-amb" role="listitem"><i></i>ING</span>
+        <span class="sig sig-pos" role="listitem"><i></i>UCG</span>
+      </div>
+      <div class="legend">
+        <span class="lp"><i></i>6 Positive</span>
+        <span class="ln"><i></i>2 Negative</span>
+        <span class="la"><i></i>2 Neutral / watch</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ================= layout ================= -->
+  <div class="layout">
+
+    <!-- ---------- left: holdings ---------- -->
+    <aside class="side" aria-label="Top 10 holdings">
+      <h2>Top 10 Holdings</h2>
+      <p class="sub">% of net assets · latest disclosure</p>
+      <ol class="holdings" id="holdings"><!-- injected --></ol>
+      <div class="side-total"><span>Combined weight</span><strong>19.22%</strong></div>
+      <div class="side-note">
+        <strong>How to read this page:</strong> each card carries the freshest overnight
+        headline, the direction of local fund flows in the holding's home market, and the
+        macro driver most likely to move it next. Color is the signal — green constructive,
+        red adverse, amber unresolved.
+      </div>
+    </aside>
+
+    <!-- ---------- center: signal cards ---------- -->
+    <section class="center" aria-label="Holding signal cards">
+      <h2>Holding Signals</h2>
+      <p class="sub">Overnight session · sorted by fund weight</p>
+      <div class="cards" id="cards"><!-- injected --></div>
+    </section>
+
+  </div>
+
+  <footer>
+    <strong>Concept mockup — for discussion only.</strong> Holdings and weights reflect the fund's
+    latest public disclosures. All headlines, price moves, flow readings and macro tags are
+    illustrative sample data created to demonstrate the product format. Nothing on this page is
+    investment advice or a recommendation. Prepared by M.&nbsp;Sunderji, July 2026.
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  /* state: pos | neg | amb  — illustrative sample data */
+  var data = [
+    { n: "Siemens AG", t: "SIE", cc: "Germany", sec: "Industrials", w: 2.19, state: "pos", move: "+1.4%",
+      head: "<b>Two sell-side upgrades on German grid capex</b> after TenneT's €14bn tender round names Siemens a primary beneficiary.", src: "Handelsblatt · 05:48 ET",
+      flow: ["up", "German institutional inflows, 3rd week"], macro: "Grid capex cycle" },
+    { n: "Siemens Energy", t: "ENR", cc: "Germany", sec: "Industrials", w: 1.86, state: "pos", move: "+3.2%",
+      head: "<b>Order backlog seen at record</b> into fiscal Q3 as European grid operators accelerate awards.", src: "Reuters · 05:52 ET",
+      flow: ["up", "Retail + ETF inflows accelerating"], macro: "Electrification" },
+    { n: "ConvaTec Group", t: "CTEC", cc: "United Kingdom", sec: "Health Care", w: 1.90, state: "amb", move: "−0.4%",
+      head: "<b>U.S. drug-pricing executive order expected this week;</b> med-tech read-across still unclear.", src: "Washington press · 05:30 ET",
+      flow: ["hold", "Flat — positioning on hold"], macro: "US policy watch" },
+    { n: "Hitachi, Ltd.", t: "6501", cc: "Japan", sec: "Industrials", w: 1.85, state: "pos", move: "+1.1%",
+      head: "<b>July NISA rebalance puts Hitachi in Tokyo's top-5 retail buys</b> for a third straight session.", src: "Nikkei · 04:10 ET",
+      flow: ["up", "Tokyo retail bid, persistent"], macro: "JPY / BoJ Jul 29" },
+    { n: "Anheuser-Busch InBev", t: "ABI", cc: "Belgium", sec: "Consumer Staples", w: 2.17, state: "neg", move: "−2.1%",
+      head: "<b>Heineken cuts H1 volume outlook;</b> EU brewers sold off in sympathy on 2.3× average volume — no ABI-specific news.", src: "Bloomberg · 06:12 ET",
+      flow: ["down", "EU staples funds in redemption"], macro: "EU consumer soft" },
+    { n: "AstraZeneca", t: "AZN", cc: "United Kingdom", sec: "Health Care", w: 1.84, state: "neg", move: "−1.8%",
+      head: "<b>Pricing-order chatter hits UK pharma</b> just as the oncology readout window opens (Jul 24).", src: "FT · 05:35 ET",
+      flow: ["down", "Global healthcare outflows, wk 2"], macro: "US drug pricing" },
+    { n: "NatWest Group", t: "NWG", cc: "United Kingdom", sec: "Financials", w: 1.78, state: "pos", move: "+0.7%",
+      head: "<b>Pre-close commentary points to NII guidance upgrade</b> as BoE cut expectations drift later.", src: "UK wires · 05:15 ET",
+      flow: ["hold", "UK funds flat; buyback absorbing"], macro: "BoE rate path" },
+    { n: "Erste Group Bank", t: "EBS", cc: "Austria", sec: "Financials", w: 1.76, state: "pos", move: "+1.9%",
+      head: "<b>CEE loan growth accelerating;</b> two brokers flag Q2 beat potential ahead of Aug 1 print.", src: "Erste local wires · 04:40 ET",
+      flow: ["up", "CEE-mandate inflows building"], macro: "Rates tailwind" },
+    { n: "ING Groep", t: "ING", cc: "Netherlands", sec: "Financials", w: 1.80, state: "amb", move: "+0.5%",
+      head: "<b>Dutch coalition floats a bank levy</b> in budget talks — early stage, ING named in local coverage.", src: "FD.nl · 03:40 ET",
+      flow: ["up", "Eurozone bank ETF inflows, wk 4"], macro: "Policy risk" },
+    { n: "UniCredit S.p.A.", t: "UCG", cc: "Italy", sec: "Financials", w: 2.07, state: "pos", move: "+0.8%",
+      head: "<b>Fourth straight week of eurozone bank inflows</b> (+€1.2bn); positioning still below 5-yr average.", src: "Flow trackers · 04:55 ET",
+      flow: ["up", "Milan institutional accumulation"], macro: "NII momentum" }
+  ];
+
+  /* left column: sorted by weight */
+  var byWeight = data.slice().sort(function (a, b) { return b.w - a.w; });
+  var maxW = byWeight[0].w;
+  document.getElementById("holdings").innerHTML = byWeight.map(function (h, i) {
+    return "<li>" +
+      '<span class="r">' + (i + 1) + "</span>" +
+      '<span class="n">' + h.n + "<small>" + h.cc + " · " + h.sec + "</small></span>" +
+      '<span class="w">' + h.w.toFixed(2) + "%</span>" +
+      '<span class="bar"><b style="width:' + (h.w / maxW * 100).toFixed(0) + '%"></b></span>' +
+      "</li>";
+  }).join("");
+
+  /* center grid: user-specified order kept, but sorted by weight for scanability */
+  var flowGlyph = { up: "▲", down: "▼", hold: "▬" };
+  document.getElementById("cards").innerHTML = byWeight.map(function (h) {
+    var pill = h.state === "pos" ? "pill-pos" : h.state === "neg" ? "pill-neg" : "pill-amb";
+    var fcls = h.flow[0];
+    return '<article class="cardx is-' + h.state + '">' +
+      '<div class="cx-top">' +
+      '<div><div class="cx-name">' + h.n + '</div>' +
+      '<div class="cx-meta">' + h.t + " · " + h.cc + " · " + h.sec + "</div></div>" +
+      '<span class="pill ' + pill + '">' + h.move + "</span>" +
+      "</div>" +
+      '<div class="cx-head">' + h.head + ' <span class="src">' + h.src + "</span></div>" +
+      '<div class="cx-rows">' +
+      '<div class="cx-row"><span class="lbl">Local flow</span><span class="val ' + fcls + '">' + flowGlyph[fcls] + " " + h.flow[1] + "</span></div>" +
+      '<div class="cx-row"><span class="lbl">Macro</span><span class="tagm">' + h.macro + "</span></div>" +
+      "</div></article>";
+  }).join("");
+})();
+</script>
