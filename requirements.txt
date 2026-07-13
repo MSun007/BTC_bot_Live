@@ -1,0 +1,14 @@
+# Dashboard (perp_dashboard_app.py) runtime dependencies.
+# Ranges pin major versions for reproducible Cloud Run builds while allowing
+# patch/minor security updates.
+Flask>=3.0,<4
+gunicorn>=21.2
+pandas>=2.1,<3
+pytz>=2024.1
+requests>=2.31
+PyJWT>=2.8
+cryptography>=42.0
+google-cloud-secret-manager>=2.18
+coinbase-advanced-py>=1.2
+ta>=0.11
+gcsfs>=2024.2
