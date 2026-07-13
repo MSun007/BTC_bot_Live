@@ -1,0 +1,11 @@
+# Keep the dashboard build context minimal and ensure engine / research code
+# never enters the container image.
+larry_perp_v1.py
+pair_scan.py
+strategy_config.json
+README.md
+.git/
+.github/
+__pycache__/
+*.pyc
+*.md
