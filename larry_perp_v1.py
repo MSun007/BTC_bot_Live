@@ -139,6 +139,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+import uuid
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, asdict
@@ -583,6 +584,29 @@ class GCS:
             check=False,
         )
 
+    def _run_with_retry(
+        self,
+        cmd: List[str],
+        input_text: Optional[str] = None,
+        attempts: int = 3,
+    ) -> subprocess.CompletedProcess:
+        """Retry transient gsutil failures without hiding the final exception."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                res = self._run(cmd, input_text=input_text)
+                if res.returncode == 0:
+                    return res
+                last_error = RuntimeError(res.stderr.strip() or res.stdout.strip() or f"gsutil exit {res.returncode}")
+            except subprocess.TimeoutExpired as exc:
+                last_error = exc
+            if attempt < attempts:
+                delay = min(8.0, (2 ** (attempt - 1)) + (time.time() % 0.75))
+                log.warning("Transient GCS command failure attempt %s/%s; retrying in %.2fs: %s", attempt, attempts, delay, last_error)
+                time.sleep(delay)
+        assert last_error is not None
+        raise last_error
+
     def read_text(self, blob_name: str, default: str = "") -> str:
         if self.use_python_storage and self.bucket is not None:
             try:
@@ -608,9 +632,7 @@ class GCS:
             f.write(text)
             tmp = f.name
         try:
-            res = self._run(["gsutil", "-h", f"Content-Type:{content_type}", "cp", tmp, self._uri(blob_name)])
-            if res.returncode != 0:
-                raise RuntimeError(res.stderr.strip() or res.stdout.strip())
+            self._run_with_retry(["gsutil", "-h", f"Content-Type:{content_type}", "cp", tmp, self._uri(blob_name)])
         finally:
             try:
                 os.unlink(tmp)
@@ -782,7 +804,15 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     global SPOT_MIN_ENTRY_SCORE, SPOT_FULL_SCORE, SPOT_MIN_ORDER_USD, MACRO_FAST_SMA, MACRO_SLOW_SMA
 
     CONTRACT_SIZE_BTC = safe_float(cfg.get("CONTRACT_SIZE_BTC"), CONTRACT_SIZE_BTC)
-    MAX_CONVICTION_CONTRACTS = safe_int(cfg.get("MAX_CONVICTION_CONTRACTS"), MAX_CONVICTION_CONTRACTS)
+    MAX_CONVICTION_CONTRACTS = max(1, safe_int(cfg.get("MAX_CONVICTION_CONTRACTS"), MAX_CONVICTION_CONTRACTS))
+    configured_abs_cap = max(1, safe_int(cfg.get("MAX_ABS_NET_CONTRACTS"), MAX_ABS_NET_CONTRACTS))
+    if MAX_CONVICTION_CONTRACTS > configured_abs_cap:
+        log.warning(
+            "Max conviction %s exceeds hard absolute cap %s; clamping conviction to the hard cap",
+            MAX_CONVICTION_CONTRACTS,
+            configured_abs_cap,
+        )
+        MAX_CONVICTION_CONTRACTS = configured_abs_cap
     PROBE_PCT = safe_float(cfg.get("PROBE_PCT"), PROBE_PCT)
     PARTIAL_PCT = safe_float(cfg.get("PARTIAL_PCT"), PARTIAL_PCT)
     STRONG_PCT = safe_float(cfg.get("STRONG_PCT"), STRONG_PCT)
@@ -797,7 +827,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     CONTRACTS_PER_TRADE_PROBE = derived_probe
     CONTRACTS_PER_TRADE_PARTIAL = derived_partial
     CONTRACTS_PER_TRADE_FULL = MAX_CONVICTION_CONTRACTS
-    MAX_ABS_NET_CONTRACTS = MAX_CONVICTION_CONTRACTS
+    MAX_ABS_NET_CONTRACTS = configured_abs_cap
     SCORE4_MACRO_OVERRIDE_ENABLED = _bool_from_any(cfg.get("SCORE4_MACRO_OVERRIDE_ENABLED"), SCORE4_MACRO_OVERRIDE_ENABLED)
     PROGRESSIVE_ADD_ONS_ENABLED = _bool_from_any(cfg.get("PROGRESSIVE_ADD_ONS_ENABLED"), PROGRESSIVE_ADD_ONS_ENABLED)
     MACRO_BLOCKED_PROBE_CONTRACTS = safe_int(cfg.get("MACRO_BLOCKED_PROBE_CONTRACTS"), CONTRACTS_PER_TRADE_PROBE)
@@ -2019,6 +2049,25 @@ def order_id_from_response(order: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def normalize_order_response(response: Any, client_order_id: str) -> Dict[str, Any]:
+    """Require Coinbase's explicit success response; a non-throwing SDK call is not enough."""
+    payload = obj_to_dict(response)
+    if not isinstance(payload, dict):
+        return {"ok": False, "response": payload, "client_order_id": client_order_id, "error": "Coinbase returned a non-dict order response"}
+    success_response = payload.get("success_response") or {}
+    error_response = payload.get("error_response") or {}
+    order_id = success_response.get("order_id") or payload.get("order_id")
+    explicit_success = payload.get("success")
+    ok = bool(order_id) and explicit_success is not False and not error_response
+    return {
+        "ok": ok,
+        "response": payload,
+        "client_order_id": client_order_id,
+        "order_id": order_id,
+        "error": None if ok else (error_response or payload.get("message") or "Coinbase did not explicitly confirm order success"),
+    }
+
+
 def get_recent_fills_for_order(cb: Any, order_id: Optional[str]) -> Dict[str, Any]:
     """Best-effort fill lookup for cleaner realized P&L / fee emails.
 
@@ -2260,14 +2309,14 @@ def place_market_order(cb: Any, side: str, contracts: int, reason: str) -> Dict[
         log.warning("DRY_RUN: would %s %s contracts for %s", side, contracts, reason)
         return {"ok": True, "dry_run": True, "side": side, "contracts": contracts, "reason": reason}
 
-    client_order_id = f"larry-v2-{int(time.time())}-{side.lower()}-{contracts}"
+    client_order_id = f"larry-v32-{int(time.time())}-{uuid.uuid4().hex[:10]}-{side.lower()}-{contracts}"
     # SDK helpers differ across versions. Prefer generic market_order if available.
     try:
         if side == "BUY":
             res = cb.market_order_buy(client_order_id=client_order_id, product_id=PERP_PRODUCT_ID, base_size=str(contracts))
         else:
             res = cb.market_order_sell(client_order_id=client_order_id, product_id=PERP_PRODUCT_ID, base_size=str(contracts))
-        return {"ok": True, "response": obj_to_dict(res), "client_order_id": client_order_id}
+        return normalize_order_response(res, client_order_id)
     except TypeError:
         # Fall back to generic create_order shape if SDK expects order_configuration.
         cfg_side = "BUY" if side == "BUY" else "SELL"
@@ -2278,7 +2327,7 @@ def place_market_order(cb: Any, side: str, contracts: int, reason: str) -> Dict[
                 side=cfg_side,
                 order_configuration={"market_market_ioc": {"base_size": str(contracts)}},
             )
-            return {"ok": True, "response": obj_to_dict(res), "client_order_id": client_order_id}
+            return normalize_order_response(res, client_order_id)
         except Exception as e:
             return {"ok": False, "error": str(e), "client_order_id": client_order_id}
     except Exception as e:
@@ -2300,10 +2349,53 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
         return {"ok": True, "plan": plan, "before": before, "after": before, "order": None}
 
     mark_at_send = safe_float(before.get("current_price"), 0.0)
+    _CYCLE_CONTEXT.update({
+        "phase": "ORDER_SUBMITTING",
+        "order_attempted": True,
+        "client_order_id": None,
+        "order_status": "SUBMITTING",
+    })
     order = place_market_order(cb, plan["action"], plan["contracts_needed"], reason)
-    time.sleep(3)
-    fills = get_recent_fills_for_order(cb, order_id_from_response(order)) if order.get("ok") else {"found": False}
-    after = get_live_net_position(cb)
+    _CYCLE_CONTEXT["client_order_id"] = order.get("client_order_id")
+    if not order.get("ok"):
+        _CYCLE_CONTEXT["order_status"] = "REJECTED_OR_UNCONFIRMED"
+        after = before
+        fills = {"found": False, "fills": [], "avg_price": None, "contracts": 0.0, "commission": 0.0}
+    else:
+        _CYCLE_CONTEXT["order_status"] = "ACKNOWLEDGED"
+        order_id = order_id_from_response(order)
+        fills = {"found": False, "fills": [], "avg_price": None, "contracts": 0.0, "commission": 0.0}
+        after = before
+        deadline = time.monotonic() + max(5, int(os.getenv("ORDER_RECONCILE_TIMEOUT_SECONDS", "20")))
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            current_fills = get_recent_fills_for_order(cb, order_id)
+            if current_fills.get("found"):
+                fills = current_fills
+            try:
+                after = get_live_net_position(cb)
+            except Exception as exc:
+                _CYCLE_CONTEXT["order_status"] = "UNKNOWN_RECONCILIATION_REQUIRED"
+                _CYCLE_CONTEXT["reconcile_error"] = str(exc)
+                continue
+            if safe_int(after.get("signed_contracts"), 0) != safe_int(before.get("signed_contracts"), 0):
+                break
+
+    before_signed_actual = safe_int(before.get("signed_contracts"), 0)
+    after_signed_actual = safe_int(after.get("signed_contracts"), 0)
+    actual_delta = abs(after_signed_actual - before_signed_actual)
+    requested_qty = safe_int(plan.get("contracts_needed"), 0)
+    if not order.get("ok"):
+        execution_status = "REJECTED_OR_UNCONFIRMED"
+    elif actual_delta <= 0:
+        execution_status = "UNKNOWN_NO_POSITION_CHANGE"
+    elif actual_delta < requested_qty:
+        execution_status = "PARTIALLY_FILLED"
+    elif after_signed_actual == safe_int(plan.get("target_signed"), 0):
+        execution_status = "FILLED"
+    else:
+        execution_status = "FILLED_POSITION_MISMATCH"
+    _CYCLE_CONTEXT["order_status"] = execution_status
 
     # v12: slippage in basis points (signed) -- positive means we paid worse than the pre-trade mark.
     fill_price = safe_float(fills.get("avg_price"), 0.0)
@@ -2317,11 +2409,16 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
     net_realized = (gross_realized - fees) if gross_realized is not None else None
     intent_meta = classify_trade_intent(plan, reason)
     result = {
-        "ok": bool(order.get("ok")), "plan": plan, "before": before, "after": after,
+        "ok": bool(order.get("ok")) and actual_delta > 0, "plan": plan, "before": before, "after": after,
         "order": order, "fills": fills, "reason": reason, "mark_at_send": mark_at_send,
         "slippage_bps": slippage_bps, "gross_realized_pnl_usd": gross_realized,
         "fees_usd": fees, "net_realized_pnl_usd": net_realized,
         "is_exit_trade": gross_realized is not None,
+        "execution_status": execution_status,
+        "requested_contracts": requested_qty,
+        "filled_contracts": safe_float(fills.get("contracts"), actual_delta) or actual_delta,
+        "position_delta_contracts": actual_delta,
+        "partial_fill": execution_status == "PARTIALLY_FILLED",
         **intent_meta,
     }
     ledger_header = [
@@ -2335,16 +2432,23 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
         iso_utc(), reason, signal_class or reason, plan["action"], plan["contracts_needed"],
         before["signed_contracts"], plan["target_signed"], after["signed_contracts"],
         mark_at_send, fill_price, slippage_bps, gross_realized, fees, net_realized,
-        order.get("ok"), order.get("client_order_id"),
+        result.get("ok"), order.get("client_order_id"),
         result.get("trade_intent"), result.get("execution_reason"), result.get("signal_reason"),
         result.get("target_before"), result.get("target_after"),
         result.get("sizing_rung_before"), result.get("sizing_rung_after"),
-        json.dumps(order, default=str)
+        json.dumps({
+            **order,
+            "execution_status": execution_status,
+            "requested_contracts": requested_qty,
+            "filled_contracts": result.get("filled_contracts"),
+            "position_delta_contracts": actual_delta,
+            "partial_fill": result.get("partial_fill"),
+        }, default=str)
     ])
     before_signed = safe_int(before.get("signed_contracts"), 0)
     after_signed = safe_int(after.get("signed_contracts"), 0)
     confirmed_change = after_signed != before_signed
-    should_email = order.get("ok") and plan.get("contracts_needed", 0) > 0 and (
+    should_email = result.get("ok") and plan.get("contracts_needed", 0) > 0 and (
         confirmed_change or not SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL
     )
     if should_email:
@@ -2482,6 +2586,60 @@ def record_exit_risk_result(state: Dict[str, Any], reason: str) -> None:
         if safe_int(risk.get("loss_streak")) >= LOSS_STREAK_LIMIT:
             risk["pause_until"] = (now_utc() + timedelta(minutes=STREAK_PAUSE_MINUTES)).isoformat()
             risk["halt_reason"] = "post_stop_cooldown"
+
+
+def recover_bot_managed_position_from_ledger(gcs: GCS, state: Dict[str, Any], live_pos: Dict[str, Any]) -> bool:
+    """Recover ownership only when Larry's last successful ledger row exactly matches live net size."""
+    live_signed = safe_int(live_pos.get("signed_contracts"), 0)
+    if live_signed == 0 or state.get("bot_managed_position"):
+        return False
+    try:
+        raw = gcs.read_text(PERP_TRADES_LEDGER_BLOB, default="")
+        if not raw.strip():
+            return False
+        rows = list(csv.DictReader(raw.splitlines()))
+        last = next((r for r in reversed(rows) if str(r.get("ok", "")).strip().lower() in ("true", "1", "yes")), None)
+        if not last:
+            return False
+        ledger_after = safe_int(last.get("after_signed"), 0)
+        client_order_id = str(last.get("client_order_id") or "")
+        if ledger_after != live_signed or not client_order_id.startswith(("larry-v2-", "larry-v32-")):
+            return False
+        state["bot_managed_position"] = {
+            "signed_contracts": live_signed,
+            "side": live_pos.get("side"),
+            "contracts": live_pos.get("contracts"),
+            "avg_entry_price": live_pos.get("avg_entry_price"),
+            "current_price": live_pos.get("current_price"),
+            "unrealized_pnl": live_pos.get("unrealized_pnl"),
+            "daily_realized_pnl": live_pos.get("daily_realized_pnl"),
+            "product_id": live_pos.get("product_id"),
+            "marked_at": iso_utc(),
+            "source_reason": last.get("reason"),
+            "ownership_source": "recovered_from_canonical_larry_ledger",
+            "recovered_client_order_id": client_order_id,
+            "recovered_trade_timestamp": last.get("timestamp"),
+        }
+        state["ownership_recovery"] = {
+            "recovered": True,
+            "at": iso_utc(),
+            "live_signed": live_signed,
+            "ledger_after_signed": ledger_after,
+            "client_order_id": client_order_id,
+        }
+        log.error("SAFETY RECOVERY: restored bot ownership from Larry ledger for live signed position %s", live_signed)
+        try:
+            send_telegram_message(
+                f"⚠️ LARRY OWNERSHIP RECOVERED\nLive position: {live_pos.get('side')} {live_pos.get('contracts')}\n"
+                f"Matched Larry order: {client_order_id}\nATR/TSL management restored after ledger verification.\nTime: {et_timestamp_short()}",
+                event_type="OWNERSHIP_RECOVERED",
+            )
+        except Exception as notify_exc:
+            log.warning("Ownership recovery notification failed: %s", notify_exc)
+        return True
+    except Exception as exc:
+        log.warning("Bot ownership recovery check failed closed: %s", exc)
+        return False
 
 
 def live_position_management_status(state: Dict[str, Any], live_pos: Dict[str, Any]) -> Dict[str, Any]:
@@ -3782,7 +3940,21 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
 # =============================================================================
 
 
+_CYCLE_CONTEXT: Dict[str, Any] = {
+    "phase": "IDLE",
+    "order_attempted": False,
+    "client_order_id": None,
+    "order_status": "NONE",
+}
+
+
 def run_once(cb: Any, gcs: GCS) -> None:
+    _CYCLE_CONTEXT.update({
+        "phase": "LOADING_STATE",
+        "order_attempted": False,
+        "client_order_id": None,
+        "order_status": "NONE",
+    })
     state = load_engine_state(gcs)
     if not state:
         state = default_engine_state()
@@ -3799,7 +3971,10 @@ def run_once(cb: Any, gcs: GCS) -> None:
     kill = read_kill_switch(gcs)
     state["kill_switch"] = kill
 
+    _CYCLE_CONTEXT["phase"] = "READING_EXCHANGE_POSITION"
     live_pos = get_live_net_position(cb)
+    _CYCLE_CONTEXT["phase"] = "EVALUATING_RISK"
+    recover_bot_managed_position_from_ledger(gcs, state, live_pos)
     # v29: dashboard emergency flatten requests are executed by the VM bot, not Cloud Run.
     # Process before normal kill-switch handling so a halt set by the dashboard does not
     # prevent the requested flatten from executing.
@@ -4128,8 +4303,10 @@ def run_once(cb: Any, gcs: GCS) -> None:
 
     maybe_send_daily_telegram_summary(gcs, state, live_pos_after)
 
+    _CYCLE_CONTEXT["phase"] = "SAVING_ENGINE_STATE"
     dashboard_state = build_dashboard_engine_state(state, sig, live_pos_after, product, last_result)
     save_engine_state(gcs, dashboard_state)
+    _CYCLE_CONTEXT["phase"] = "SAVING_POSITION_STATE"
     write_position_state(gcs, live_pos_after, dashboard_state)
     try:
         write_heartbeat(gcs, sig.price or mark, state.get("phantom", {}).get("state", "MONITORING"), live_pos_after)
@@ -4147,6 +4324,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
         live_pos_after.get("avg_entry_price"),
         live_pos_after.get("unrealized_pnl"),
     )
+    _CYCLE_CONTEXT["phase"] = "COMPLETE"
 
 
 def main() -> None:
@@ -4166,7 +4344,21 @@ def main() -> None:
         except Exception as e:
             log.exception("Main loop error: %s", e)
             if TELEGRAM_INCLUDE_ERRORS:
-                send_telegram_message(f"🚨 LARRY ERROR\n{type(e).__name__}: {str(e)[:800]}\nAction: no order submitted this cycle; retrying next loop.\nTime: {et_timestamp_short()}", event_type="ERROR")
+                attempted = bool(_CYCLE_CONTEXT.get("order_attempted"))
+                action = (
+                    "Order activity occurred; verify client order ID and Coinbase position before any retry."
+                    if attempted
+                    else "No order was attempted before this failure; retrying next loop."
+                )
+                send_telegram_message(
+                    f"🚨 LARRY ERROR\n{type(e).__name__}: {str(e)[:800]}\n"
+                    f"Phase: {_CYCLE_CONTEXT.get('phase')}\n"
+                    f"Order attempted: {'YES' if attempted else 'NO'}\n"
+                    f"Order status: {_CYCLE_CONTEXT.get('order_status')}\n"
+                    f"Client order ID: {_CYCLE_CONTEXT.get('client_order_id') or 'none'}\n"
+                    f"Action: {action}\nTime: {et_timestamp_short()}",
+                    event_type="ERROR",
+                )
             try:
                 # Write a DOWN/ERROR-ish heartbeat while service is still alive.
                 gcs = GCS(BUCKET_NAME)
