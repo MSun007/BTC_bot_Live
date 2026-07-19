@@ -4333,7 +4333,10 @@ function drawPnlBarChart(canvas, rows, opts){
    ...r, idx:i+1, y:Number(r.net_realized_pnl_usd||0), label:(r.timestamp_et||fmtET(r.timestamp)||('T'+(i+1)))
  }));
  if(!data.length){ ctx.fillStyle='rgba(148,163,184,.8)'; ctx.font='13px system-ui'; ctx.fillText('No realized trades in this range yet',pad.l,pad.t+28); return null; }
- let running=0; data.forEach(d=>{ running+=d.y; d.cum=running; });
+ // Keep the bars scoped to the selected range, but preserve the ledger's all-time
+ // running P&L for the cumulative line. Falling back to a local sum supports older
+ // ledger rows that predate running_net_pnl_usd.
+ let running=0; data.forEach(d=>{ running+=d.y; const ledgerRunning=Number(d.running_net_pnl_usd); d.cum=(d.running_net_pnl_usd!==null && d.running_net_pnl_usd!=='' && d.running_net_pnl_usd!==undefined && Number.isFinite(ledgerRunning))?ledgerRunning:running; });
  const barVals=data.map(d=>d.y), cumVals=data.map(d=>d.cum);
  const maxAbs=Math.max(1, ...barVals.map(v=>Math.abs(v)), ...cumVals.map(v=>Math.abs(v)));
  const ymax=maxAbs*1.18, ymin=-maxAbs*1.18;
@@ -4351,7 +4354,7 @@ function drawPnlBarChart(canvas, rows, opts){
  ctx.stroke();
  data.forEach((d,i)=>{ const xx=cx(i), yy=y(d.cum); ctx.fillStyle='rgba(56,189,248,.98)'; ctx.strokeStyle='rgba(2,6,23,.95)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(xx,yy,3.5,0,Math.PI*2); ctx.fill(); ctx.stroke(); });
  ctx.fillStyle='rgba(148,163,184,.75)'; ctx.font='11px system-ui'; ctx.fillText(shortTimeLabel(parseTimeMs(data[0].timestamp)||Date.now(),opts.range),pad.l,h-10); const rt=shortTimeLabel(parseTimeMs(data[data.length-1].timestamp)||Date.now(),opts.range); const tw=ctx.measureText(rt).width; ctx.fillText(rt,w-pad.r-tw,h-10);
- const wins=data.filter(d=>d.y>0).length, losses=data.filter(d=>d.y<0).length, net=data.reduce((a,d)=>a+d.y,0); ctx.font='12px system-ui'; ctx.fillStyle='rgba(226,232,240,.84)'; ctx.fillText(`Bars: per-trade P&L · Line: cumulative P&L · net ${usd(net)}`, pad.l, 15);
+ const wins=data.filter(d=>d.y>0).length, losses=data.filter(d=>d.y<0).length, net=data[data.length-1].cum; ctx.font='12px system-ui'; ctx.fillStyle='rgba(226,232,240,.84)'; ctx.fillText(`Bars: per-trade P&L · Line: cumulative P&L · net ${usd(net)}`, pad.l, 15);
  ctx.fillStyle='rgba(34,197,94,.88)'; ctx.fillRect(w-170,8,10,10); ctx.fillStyle='rgba(148,163,184,.82)'; ctx.fillText('Win',w-156,17);
  ctx.fillStyle='rgba(239,68,68,.88)'; ctx.fillRect(w-124,8,10,10); ctx.fillStyle='rgba(148,163,184,.82)'; ctx.fillText('Loss',w-110,17);
  ctx.strokeStyle='rgba(56,189,248,.96)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(w-66,13); ctx.lineTo(w-42,13); ctx.stroke(); ctx.fillStyle='rgba(148,163,184,.82)'; ctx.fillText('Cum',w-38,17);
