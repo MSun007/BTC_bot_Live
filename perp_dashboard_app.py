@@ -4560,7 +4560,7 @@ function renderLarryMindset(d){
  set('mindsetExit',exitValue); set('mindsetExitNote',hasPosition?`Stop ${pr.active_stop?usd(pr.active_stop):'—'} · trail activates ${pr.tsl_activation_price?usd(pr.tsl_activation_price):'—'}`:'Exit levels initialize at entry');
  ['mindsetRegimeStep','mindsetTriggerStep','mindsetConvictionStep','mindsetPositionStep','mindsetExitStep'].forEach(id=>{const e=$(id);if(e)e.className='mindset-step';});
  const order=['mindsetRegimeStep','mindsetTriggerStep','mindsetConvictionStep','mindsetPositionStep','mindsetExitStep'], ai=order.indexOf(activeStep);
- order.forEach((id,i)=>{const e=$(id);if(e)e.classList.add(i<ai?'done':i===ai?'active':'');});
+ order.forEach((id,i)=>{const e=$(id);if(!e)return;if(i<ai)e.classList.add('done');else if(i===ai)e.classList.add('active');});
  const uplPct=Number(pr.unrealized_pnl_pct||0), tslPct=Number(pr.tsl_activation_pct||cfg.TSL_ACTIVATION_PCT||.015)*100;
  let tpPct=Number(cfg.TP1_PCT||.0075)*100; if(contracts>=maxN)tpPct=Number(cfg.TP1_FULL_TRIGGER_PCT||.005)*100;else if(contracts>=strong)tpPct=Number(cfg.TP1_STRONG_TRIGGER_PCT||.006)*100;else tpPct=Number(cfg.TP1_PROBE_TRIGGER_PCT||.0075)*100;
  const progress=hasPosition?(pr.tsl_active?100:Math.max(0,Math.min(100,tslPct?uplPct/tslPct*100:0))):0;
