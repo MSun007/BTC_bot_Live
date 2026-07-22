@@ -2245,6 +2245,7 @@ def perp_position_risk_state(positions: List[Dict[str, Any]], cfg: Dict[str, Any
     if not isinstance(raw_state, dict):
         raw_state = {}
     controls = raw_state.get("position_controls") if isinstance(raw_state.get("position_controls"), dict) else {}
+    manual_status = raw_state.get("manual_position_status") if isinstance(raw_state.get("manual_position_status"), dict) else {}
 
     contract_size = safe_float(cfg.get("CONTRACT_SIZE_BTC"), 0.01) or 0.01
     tsl_activation_pct = safe_float(cfg.get("TSL_ACTIVATION_PCT"), 0.0) or 0.0
@@ -2252,6 +2253,8 @@ def perp_position_risk_state(positions: List[Dict[str, Any]], cfg: Dict[str, Any
     atr_mult = safe_float(cfg.get("ATR_STOP_MULTIPLIER"), 1.5) or 1.5
 
     manual_mode = str(cfg.get("MANUAL_POSITION_MODE") or "monitor_only")
+    bot_managed = bool(manual_status.get("bot_managed")) and bool(manual_status.get("allow_bot_to_trade_position"))
+    effective_management_mode = "auto_managed" if bot_managed else manual_mode
     if not positions:
         return {
             "has_position": False,
@@ -2354,10 +2357,10 @@ def perp_position_risk_state(positions: List[Dict[str, Any]], cfg: Dict[str, Any
         "progress_to_activation_pct": progress_to_activation_pct,
         "distance_to_stop": distance_to_stop,
         "distance_to_stop_pct": distance_to_stop_pct,
-        "status": ("Manual position monitor-only — Larry will not execute ATR/TSL exits on this exposure. " + status) if manual_mode == "monitor_only" else status,
-        "management_mode": manual_mode,
-        "manual_monitor_only": manual_mode == "monitor_only",
-        "source": "Coinbase live position + perp_engine_state.position_controls (v29 clean)",
+        "status": ("Manual position monitor-only — Larry will not execute ATR/TSL exits on this exposure. " + status) if effective_management_mode == "monitor_only" else status,
+        "management_mode": effective_management_mode,
+        "manual_monitor_only": effective_management_mode == "monitor_only",
+        "source": "Coinbase live position + v34 engine ownership and position controls",
     }
 
 def portfolio_overlay_state(spot_bal: Dict[str, Any], fut_bal: Dict[str, Any], positions: List[Dict[str, Any]], cfg: Dict[str, Any], capital: Dict[str, Any], clean_book: Dict[str, Any], live_price_hint: float = 0.0) -> Dict[str, Any]:
