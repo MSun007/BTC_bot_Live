@@ -347,4 +347,11 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-The v34 authority-cleanup release makes Max Conviction the sole absolute size control, removes inactive configuration noise, tightens ownership recovery and gives the dashboard an explicit position-authority status. Record the final deployment commit and Cloud Run revision here after production verification.
+The v34 authority-cleanup release makes Max Conviction the sole absolute size control, removes inactive configuration noise, tightens ownership recovery and gives the dashboard an explicit position-authority status.
+
+Production deployment (July 22, 2026):
+
+- Code release commit: `a03ad05`
+- Cloud Run dashboard revision: `perp-bot-dashboard-00128-j46` (100% traffic)
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v34_authority_cleanup`
