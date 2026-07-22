@@ -219,7 +219,6 @@ CONTRACTS_PER_TRADE_PARTIAL = int(os.getenv("CONTRACTS_PER_TRADE_PARTIAL", str(d
 CONTRACTS_PER_TRADE_PROBE = int(os.getenv("CONTRACTS_PER_TRADE_PROBE", str(derived_contract_tier(MAX_CONVICTION_CONTRACTS, PROBE_PCT))))
 # Backwards-compat constant: bridge layer default add size.
 CONTRACTS_PER_TRADE = int(os.getenv("CONTRACTS_PER_TRADE", str(CONTRACTS_PER_TRADE_PROBE)))
-MAX_ABS_NET_CONTRACTS = int(os.getenv("MAX_ABS_NET_CONTRACTS", str(MAX_CONVICTION_CONTRACTS)))
 SCORE4_MACRO_OVERRIDE_ENABLED = os.getenv("SCORE4_MACRO_OVERRIDE_ENABLED", "true").lower() in ("1", "true", "yes")
 MACRO_BLOCKED_PROBE_CONTRACTS = int(os.getenv("MACRO_BLOCKED_PROBE_CONTRACTS", str(CONTRACTS_PER_TRADE_PROBE)))
 # v14 progressive add-on / pyramiding controls. The bot trades to a confidence-derived
@@ -368,7 +367,6 @@ DEFAULT_STRATEGY_CONFIG = {
     "CONTRACTS_PER_TRADE_FULL": CONTRACTS_PER_TRADE_FULL,
     "CONTRACTS_PER_TRADE_PARTIAL": CONTRACTS_PER_TRADE_PARTIAL,
     "CONTRACTS_PER_TRADE_PROBE": CONTRACTS_PER_TRADE_PROBE,
-    "MAX_ABS_NET_CONTRACTS": MAX_ABS_NET_CONTRACTS,
     "SCORE4_MACRO_OVERRIDE_ENABLED": SCORE4_MACRO_OVERRIDE_ENABLED,
     "MACRO_BLOCKED_PROBE_CONTRACTS": MACRO_BLOCKED_PROBE_CONTRACTS,
     "PROGRESSIVE_ADD_ONS_ENABLED": PROGRESSIVE_ADD_ONS_ENABLED,
@@ -791,7 +789,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
     int_keys = [
         "MAX_CONVICTION_CONTRACTS", "CONTRACTS_PER_TRADE", "CONTRACTS_PER_TRADE_FULL", "CONTRACTS_PER_TRADE_PARTIAL",
         "CONTRACTS_PER_TRADE_PROBE", "MACRO_BLOCKED_PROBE_CONTRACTS",
-        "MAX_ABS_NET_CONTRACTS", "ATR_PERIOD",
+        "ATR_PERIOD",
         "DAILY_STOP_LIMIT", "LOSS_STREAK_LIMIT",
         "SIGNAL_ARM_SCORE", "SIGNAL_COMMIT_SCORE", "SIGNAL_CANCEL_SCORE", "SIGNAL_HYSTERESIS_ARM_SCORE",
         "SIGNAL_VALIDITY_MINUTES", "REVERSAL_PROBE_CONTRACTS",
@@ -823,7 +821,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     This keeps the current file structure stable while making parameters live
     configurable. Product IDs and exchange plumbing remain code/env controlled.
     """
-    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, MAX_ABS_NET_CONTRACTS, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
+    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
     global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES
@@ -834,14 +832,6 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
 
     CONTRACT_SIZE_BTC = safe_float(cfg.get("CONTRACT_SIZE_BTC"), CONTRACT_SIZE_BTC)
     MAX_CONVICTION_CONTRACTS = max(1, safe_int(cfg.get("MAX_CONVICTION_CONTRACTS"), MAX_CONVICTION_CONTRACTS))
-    configured_abs_cap = max(1, safe_int(cfg.get("MAX_ABS_NET_CONTRACTS"), MAX_ABS_NET_CONTRACTS))
-    if MAX_CONVICTION_CONTRACTS > configured_abs_cap:
-        log.warning(
-            "Max conviction %s exceeds hard absolute cap %s; clamping conviction to the hard cap",
-            MAX_CONVICTION_CONTRACTS,
-            configured_abs_cap,
-        )
-        MAX_CONVICTION_CONTRACTS = configured_abs_cap
     PROBE_PCT = safe_float(cfg.get("PROBE_PCT"), PROBE_PCT)
     PARTIAL_PCT = safe_float(cfg.get("PARTIAL_PCT"), PARTIAL_PCT)
     STRONG_PCT = safe_float(cfg.get("STRONG_PCT"), STRONG_PCT)
@@ -856,7 +846,6 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     CONTRACTS_PER_TRADE_PROBE = derived_probe
     CONTRACTS_PER_TRADE_PARTIAL = derived_partial
     CONTRACTS_PER_TRADE_FULL = MAX_CONVICTION_CONTRACTS
-    MAX_ABS_NET_CONTRACTS = configured_abs_cap
     SCORE4_MACRO_OVERRIDE_ENABLED = _bool_from_any(cfg.get("SCORE4_MACRO_OVERRIDE_ENABLED"), SCORE4_MACRO_OVERRIDE_ENABLED)
     PROGRESSIVE_ADD_ONS_ENABLED = _bool_from_any(cfg.get("PROGRESSIVE_ADD_ONS_ENABLED"), PROGRESSIVE_ADD_ONS_ENABLED)
     MACRO_BLOCKED_PROBE_CONTRACTS = safe_int(cfg.get("MACRO_BLOCKED_PROBE_CONTRACTS"), CONTRACTS_PER_TRADE_PROBE)
@@ -1213,7 +1202,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v33_adaptive_risk_structure",
+        "version": "larry_perp_v34_authority_cleanup",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -2314,7 +2303,8 @@ Timestamp
 
 
 def clamp_target(target: int) -> int:
-    return max(-MAX_ABS_NET_CONTRACTS, min(MAX_ABS_NET_CONTRACTS, int(target)))
+    """Clamp every desired net position to the operator's Max Conviction setting."""
+    return max(-MAX_CONVICTION_CONTRACTS, min(MAX_CONVICTION_CONTRACTS, int(target)))
 
 
 def safe_target_order_plan(current_signed: int, target_signed: int) -> Dict[str, Any]:
@@ -2773,9 +2763,39 @@ def record_exit_risk_result(state: Dict[str, Any], reason: str) -> None:
 
 
 def recover_bot_managed_position_from_ledger(gcs: GCS, state: Dict[str, Any], live_pos: Dict[str, Any]) -> bool:
-    """Recover ownership only when Larry's last successful ledger row exactly matches live net size."""
+    """Recover ownership only when persisted bot-management continuity is provable.
+
+    A historical ledger row is supporting evidence, never sufficient evidence by
+    itself. If the prior cycle did not already identify this exact exchange
+    position as bot-managed, fail closed and leave it monitor-only.
+    """
     live_signed = safe_int(live_pos.get("signed_contracts"), 0)
     if live_signed == 0 or state.get("bot_managed_position"):
+        return False
+    prior_status = state.get("manual_position_status") or {}
+    prior_live = state.get("last_exchange_position") or {}
+    prior_signed = safe_int(prior_live.get("signed_contracts"), 0)
+    same_product = str(prior_live.get("product_id") or "") == str(live_pos.get("product_id") or "")
+    prior_avg = safe_float(prior_live.get("avg_entry_price"), 0.0)
+    live_avg = safe_float(live_pos.get("avg_entry_price"), 0.0)
+    same_average = bool(prior_avg and live_avg and abs(prior_avg - live_avg) <= 0.01)
+    continuity_proven = (
+        bool(prior_status.get("bot_managed"))
+        and bool(prior_status.get("allow_bot_to_trade_position"))
+        and prior_signed == live_signed
+        and same_product
+        and same_average
+    )
+    if not continuity_proven:
+        state["ownership_recovery"] = {
+            "recovered": False,
+            "at": iso_utc(),
+            "reason": "persisted_bot_management_continuity_not_proven",
+            "live_signed": live_signed,
+            "prior_signed": prior_signed,
+            "same_product": same_product,
+            "same_average": same_average,
+        }
         return False
     try:
         raw = gcs.read_text(PERP_TRADES_LEDGER_BLOB, default="")
@@ -2837,6 +2857,10 @@ def live_position_management_status(state: Dict[str, Any], live_pos: Dict[str, A
     signed = safe_int(live_pos.get("signed_contracts"), 0)
     bot_pos = state.get("bot_managed_position") or {}
     bot_signed = safe_int(bot_pos.get("signed_contracts"), 0)
+    same_product = str(bot_pos.get("product_id") or "") == str(live_pos.get("product_id") or "")
+    bot_avg = safe_float(bot_pos.get("avg_entry_price"), 0.0)
+    live_avg = safe_float(live_pos.get("avg_entry_price"), 0.0)
+    same_average = bool(bot_avg and live_avg and abs(bot_avg - live_avg) <= 0.01)
     mode = MANUAL_POSITION_MODE if MANUAL_POSITION_MODE in ("monitor_only", "full_management") else "monitor_only"
 
     if signed == 0:
@@ -2864,7 +2888,7 @@ def live_position_management_status(state: Dict[str, Any], live_pos: Dict[str, A
     # monitor_only default: only positions explicitly recorded as bot-managed
     # can be modified by ATR/TSL/core exits. If the user adds or reduces manually,
     # the signed exposure diverges and the whole live position becomes monitor-only.
-    if bot_signed != 0 and bot_signed == signed:
+    if bot_signed != 0 and bot_signed == signed and same_product and same_average:
         return {
             "mode": mode,
             "is_manual_or_external": False,
@@ -2880,9 +2904,11 @@ def live_position_management_status(state: Dict[str, Any], live_pos: Dict[str, A
         "is_manual_or_external": True,
         "bot_managed": False,
         "allow_bot_to_trade_position": False,
-        "reason": "manual_or_external_position_monitor_only",
+        "reason": "position_ownership_not_proven_monitor_only",
         "bot_managed_signed": bot_signed,
         "live_signed": signed,
+        "same_product": same_product,
+        "same_average": same_average,
     }
 
 
@@ -3543,7 +3569,7 @@ def core_target_for_signal(current_signed: int, signal: str, score: int = 3, fun
     target_abs = safe_int(decision.get("target_abs_contracts", decision.get("final_contracts", 0)), 0)
     if target_abs <= 0:
         return current_signed
-    target_abs = min(target_abs, MAX_ABS_NET_CONTRACTS, MAX_CONVICTION_CONTRACTS)
+    target_abs = min(target_abs, MAX_CONVICTION_CONTRACTS)
     if not PROGRESSIVE_ADD_ONS_ENABLED:
         # Backwards-compatible behavior: each valid signal adds one tier.
         if signal == "LONG":
@@ -4056,7 +4082,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
         "contract_size_btc": CONTRACT_SIZE_BTC,
         "fixed_contracts_per_trade": CONTRACTS_PER_TRADE,
         "max_conviction_contracts": MAX_CONVICTION_CONTRACTS,
-        "max_abs_net_contracts": MAX_ABS_NET_CONTRACTS,
+        "max_position_contracts": MAX_CONVICTION_CONTRACTS,
         "last_core_sizing_decision": state.get("last_core_sizing_decision"),
         "iaf_rules": {
             "atr_stop_multiplier": ATR_MULTIPLIER,
@@ -4314,7 +4340,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
             if live_signed_for_ext != 0 and ext_target_price > 0 and ext_target_contracts > abs(live_signed_for_ext) and side_ok and not ext_done:
                 entries_allowed_ext, reason_ext = risk_allows_entry(state)
                 if entries_allowed_ext:
-                    target_ext = clamp_target((1 if live_signed_for_ext > 0 else -1) * min(ext_target_contracts, MAX_CONVICTION_CONTRACTS, MAX_ABS_NET_CONTRACTS))
+                    target_ext = clamp_target((1 if live_signed_for_ext > 0 else -1) * min(ext_target_contracts, MAX_CONVICTION_CONTRACTS))
                     cd_key_ext = "perp_last_long_entry_at" if live_signed_for_ext > 0 else "perp_last_short_entry_at"
                     cd_ext = cooldown_status(state, cd_key_ext)
                     if cd_ext.get("active"):

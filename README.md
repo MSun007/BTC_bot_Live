@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v33_adaptive_risk_structure
+larry_perp_v34_authority_cleanup
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -43,7 +43,7 @@ Typical lifecycle:
 MONITORING → PHANTOM_ARMED → CLOSED-CANDLE CONFIRMATION → COMMITTED ENTRY
 ```
 
-Position size scales with conviction. The effective ladder is derived from `MAX_CONVICTION_CONTRACTS` and the configured probe, partial and strong percentages. The final target is also limited by `MAX_ABS_NET_CONTRACTS` and the portfolio leverage guard.
+Position size scales with conviction. The effective ladder is derived from `MAX_CONVICTION_CONTRACTS` and the configured probe, partial and strong percentages. `MAX_CONVICTION_CONTRACTS` is the sole absolute contract limit; the portfolio leverage guard may resize a target lower when account equity cannot safely support it.
 
 Progressive additions trade toward a higher target size only when confidence improves. They are not repeated identical orders.
 
@@ -170,7 +170,13 @@ Automatic FISHED re-entry should remain disabled until the shadow dataset is lar
 
 ## Dashboard
 
-The Cloud Run dashboard is designed for desktop and mobile operation. The Larry Decision Pipeline displays:
+The Cloud Run dashboard is designed for desktop and mobile operation. The Position Authority panel leads with the most important operational fact:
+
+- `AUTO-MANAGED`: Larry has verified ownership and may execute exits and adjustments.
+- `NOT MANAGED`: Larry can display calculated levels but will not submit orders for the position.
+- `FLAT`: Coinbase reports no open futures position.
+
+The Larry Decision Pipeline displays:
 
 - Macro, funding and risk gates
 - Long and short trigger scores
@@ -194,7 +200,7 @@ MANUAL_POSITION_MODE=monitor_only
 
 In this mode, Larry will not place exits, additions, flips or flattening trades against an unverified manual/external position. If Coinbase exposure diverges from Larry's recorded bot-managed exposure, the dashboard identifies the position as monitor-only.
 
-Ownership may be recovered only when the latest successful canonical Larry ledger row exactly matches the live Coinbase signed position.
+Ownership recovery fails closed. A matching historical ledger row is supporting evidence but is not sufficient by itself. Recovery requires the prior persisted cycle to have already classified the position as bot-managed, with matching signed quantity, product and Coinbase average-entry fingerprint. If continuity cannot be proven, the position remains monitor-only.
 
 ## Order execution safety
 
@@ -215,7 +221,7 @@ When an order outcome is ambiguous, verify Coinbase position and client order ID
 
 ### Kill switch
 
-`gs://btc_trade_log/bot_halt.json` is checked before normal order placement. When `halt=true`, telemetry continues but automated trading is skipped.
+`gs://btc_trade_log/bot_halt.json` is checked before normal order placement. When `halt=true`, telemetry continues but Larry submits no further orders, including automated exits. An existing position remains open until it is handled in Coinbase or through the separate Emergency Close Futures workflow.
 
 Emergency flatten requests are signed, claimed through generation-matched writes and executed by the VM bot. A stuck in-progress request can be safely reconciled after restart.
 
@@ -233,11 +239,12 @@ Funding can block or reduce position size when carrying cost becomes adverse. Th
 
 The production defaults live in `strategy_config.json`. The bot merges the stored GCS configuration over code defaults each cycle.
 
-Key v33 settings:
+Key v34 settings:
 
 ```json
 {
   "ATR_STOP_MULTIPLIER": 1.5,
+  "MAX_CONVICTION_CONTRACTS": 20,
   "TP1_USE_R_MULTIPLE": true,
   "TP1_R_MULTIPLE": 0.75,
   "ADAPTIVE_DEFENSE_ENABLED": true,
@@ -285,6 +292,9 @@ The current tests verify:
 - Confirmed pivots exclude the newest incomplete bar
 - Adaptive reduction targets a lower ladder rung
 - BURNED scoring recognizes repeated same-side FISHED observations
+- Max Conviction is the sole absolute contract clamp
+- Position management requires a matching exchange ownership fingerprint
+- Ledger recovery fails closed without prior bot-managed continuity
 
 Also run syntax checks before deployment:
 
@@ -316,7 +326,7 @@ Production verification should include:
 
 ```text
 Service: active
-Engine: larry_perp_v33_adaptive_risk_structure
+Engine: larry_perp_v34_authority_cleanup
 Exchange position: expected side and quantity
 Dashboard feed: current
 Cloud Run revision: healthy
@@ -337,10 +347,4 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-The v33 adaptive-risk release was introduced in commit:
-
-```text
-8182334 Add adaptive risk and market structure controls
-```
-
-It was deployed with Coinbase flat, the production service active, the dashboard responsive on desktop/mobile, and the post-stop classifier restricted to shadow operation.
+The v34 authority-cleanup release makes Max Conviction the sole absolute size control, removes inactive configuration noise, tightens ownership recovery and gives the dashboard an explicit position-authority status. Record the final deployment commit and Cloud Run revision here after production verification.

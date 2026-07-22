@@ -69,6 +69,48 @@ class AdaptiveRiskTests(unittest.TestCase):
         )
         self.assertAlmostEqual(controls["tp1_trigger_price"], 104.5)
 
+    def test_max_conviction_is_the_only_absolute_position_limit(self):
+        previous = larry.MAX_CONVICTION_CONTRACTS
+        try:
+            larry.MAX_CONVICTION_CONTRACTS = 20
+            self.assertEqual(larry.clamp_target(50), 20)
+            self.assertEqual(larry.clamp_target(-50), -20)
+        finally:
+            larry.MAX_CONVICTION_CONTRACTS = previous
+
+    def test_management_requires_matching_exchange_fingerprint(self):
+        state = {
+            "bot_managed_position": {
+                "signed_contracts": -4,
+                "product_id": "PERP",
+                "avg_entry_price": 100.0,
+            }
+        }
+        exact = larry.live_position_management_status(
+            state, {"signed_contracts": -4, "product_id": "PERP", "avg_entry_price": 100.0}
+        )
+        changed_average = larry.live_position_management_status(
+            state, {"signed_contracts": -4, "product_id": "PERP", "avg_entry_price": 101.0}
+        )
+        self.assertTrue(exact["allow_bot_to_trade_position"])
+        self.assertFalse(changed_average["allow_bot_to_trade_position"])
+
+    def test_ledger_recovery_fails_closed_without_prior_bot_continuity(self):
+        class NeverReadLedger:
+            def read_text(self, *_args, **_kwargs):
+                raise AssertionError("ledger must not be consulted without continuity")
+
+        state = {"manual_position_status": {"bot_managed": False}, "last_exchange_position": {}}
+        recovered = larry.recover_bot_managed_position_from_ledger(
+            NeverReadLedger(), state,
+            {"signed_contracts": -4, "product_id": "PERP", "avg_entry_price": 100.0},
+        )
+        self.assertFalse(recovered)
+        self.assertEqual(
+            state["ownership_recovery"]["reason"],
+            "persisted_bot_management_continuity_not_proven",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
