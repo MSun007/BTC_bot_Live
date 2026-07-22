@@ -139,6 +139,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+import uuid
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, asdict
@@ -263,6 +264,21 @@ TP1_PROBE_TRIGGER_PCT = float(os.getenv("TP1_PROBE_TRIGGER_PCT", "0.0075"))
 TP1_PARTIAL_TRIGGER_PCT = float(os.getenv("TP1_PARTIAL_TRIGGER_PCT", "0.0075"))
 TP1_STRONG_TRIGGER_PCT = float(os.getenv("TP1_STRONG_TRIGGER_PCT", "0.0060"))
 TP1_FULL_TRIGGER_PCT = float(os.getenv("TP1_FULL_TRIGGER_PCT", "0.0050"))
+# v33 adaptive exit architecture. The 1.5x ATR stop remains the firm, final
+# protection. These controls can reduce risk sooner when several independent
+# pieces of adverse evidence agree. Pivot and stop-blown classification starts
+# in shadow mode; it cannot re-enter or reverse a position.
+TP1_USE_R_MULTIPLE = os.getenv("TP1_USE_R_MULTIPLE", "true").lower() in ("1", "true", "yes")
+TP1_R_MULTIPLE = float(os.getenv("TP1_R_MULTIPLE", "0.75"))
+ADAPTIVE_DEFENSE_ENABLED = os.getenv("ADAPTIVE_DEFENSE_ENABLED", "true").lower() in ("1", "true", "yes")
+ADAPTIVE_REDUCE_SCORE = int(os.getenv("ADAPTIVE_REDUCE_SCORE", "65"))
+ADAPTIVE_EXIT_SCORE = int(os.getenv("ADAPTIVE_EXIT_SCORE", "85"))
+ADAPTIVE_CONFIRM_CYCLES = int(os.getenv("ADAPTIVE_CONFIRM_CYCLES", "2"))
+ADAPTIVE_REENTRY_COOLDOWN_MINUTES = int(os.getenv("ADAPTIVE_REENTRY_COOLDOWN_MINUTES", "15"))
+SWING_PIVOT_ENABLED = os.getenv("SWING_PIVOT_ENABLED", "true").lower() in ("1", "true", "yes")
+SWING_PIVOT_LEFT_BARS = int(os.getenv("SWING_PIVOT_LEFT_BARS", "2"))
+SWING_PIVOT_RIGHT_BARS = int(os.getenv("SWING_PIVOT_RIGHT_BARS", "2"))
+STOP_BLOWN_SHADOW_MODE = os.getenv("STOP_BLOWN_SHADOW_MODE", "true").lower() in ("1", "true", "yes")
 PHANTOM_EXTENSION_PCT = float(os.getenv("PHANTOM_EXTENSION_PCT", "0.005"))
 FUNDING_LONG_MAX = float(os.getenv("FUNDING_LONG_MAX", "0.001"))
 FUNDING_SHORT_MIN = float(os.getenv("FUNDING_SHORT_MIN", "-0.001"))
@@ -383,6 +399,17 @@ DEFAULT_STRATEGY_CONFIG = {
     "TP1_PARTIAL_TRIGGER_PCT": TP1_PARTIAL_TRIGGER_PCT,
     "TP1_STRONG_TRIGGER_PCT": TP1_STRONG_TRIGGER_PCT,
     "TP1_FULL_TRIGGER_PCT": TP1_FULL_TRIGGER_PCT,
+    "TP1_USE_R_MULTIPLE": TP1_USE_R_MULTIPLE,
+    "TP1_R_MULTIPLE": TP1_R_MULTIPLE,
+    "ADAPTIVE_DEFENSE_ENABLED": ADAPTIVE_DEFENSE_ENABLED,
+    "ADAPTIVE_REDUCE_SCORE": ADAPTIVE_REDUCE_SCORE,
+    "ADAPTIVE_EXIT_SCORE": ADAPTIVE_EXIT_SCORE,
+    "ADAPTIVE_CONFIRM_CYCLES": ADAPTIVE_CONFIRM_CYCLES,
+    "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": ADAPTIVE_REENTRY_COOLDOWN_MINUTES,
+    "SWING_PIVOT_ENABLED": SWING_PIVOT_ENABLED,
+    "SWING_PIVOT_LEFT_BARS": SWING_PIVOT_LEFT_BARS,
+    "SWING_PIVOT_RIGHT_BARS": SWING_PIVOT_RIGHT_BARS,
+    "STOP_BLOWN_SHADOW_MODE": STOP_BLOWN_SHADOW_MODE,
     "PHANTOM_EXTENSION_PCT": PHANTOM_EXTENSION_PCT,
     "FUNDING_LONG_MAX": FUNDING_LONG_MAX,
     "FUNDING_SHORT_MIN": FUNDING_SHORT_MIN,
@@ -544,12 +571,12 @@ def build_storage_client() -> Any:
 # =============================================================================
 
 class GCS:
-    """GCS helper with gsutil-first fallback.
+    """GCS helper with a gcloud-storage subprocess fallback.
 
     The earlier v2 used google-cloud-storage directly. On this VM that can fail while
     trying to discover ADC through the metadata server with an SSL certificate error.
-    The bot already runs successfully with gsutil elsewhere, so this helper defaults
-    to gsutil and only falls back to the Python storage client when explicitly asked.
+    The bot uses the Google Cloud CLI when the Python storage client is not explicitly
+    enabled. ``gcloud storage`` shares gcloud credentials and supersedes gsutil.
     """
 
     def __init__(self, bucket_name: str):
@@ -564,10 +591,10 @@ class GCS:
                 self.bucket = self.client.bucket(bucket_name)
                 log.info("GCS mode: python google-cloud-storage client")
             except Exception as e:
-                log.warning("Python GCS client unavailable, falling back to gsutil: %s", e)
+                log.warning("Python GCS client unavailable, falling back to gcloud storage: %s", e)
                 self.use_python_storage = False
         if not self.use_python_storage:
-            log.info("GCS mode: gsutil subprocess")
+            log.info("GCS mode: gcloud storage subprocess")
 
     def _uri(self, blob_name: str) -> str:
         return f"{self.prefix}/{blob_name}"
@@ -583,6 +610,29 @@ class GCS:
             check=False,
         )
 
+    def _run_with_retry(
+        self,
+        cmd: List[str],
+        input_text: Optional[str] = None,
+        attempts: int = 3,
+    ) -> subprocess.CompletedProcess:
+        """Retry transient gcloud storage failures without hiding the final exception."""
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max(1, attempts) + 1):
+            try:
+                res = self._run(cmd, input_text=input_text)
+                if res.returncode == 0:
+                    return res
+                last_error = RuntimeError(res.stderr.strip() or res.stdout.strip() or f"gcloud storage exit {res.returncode}")
+            except subprocess.TimeoutExpired as exc:
+                last_error = exc
+            if attempt < attempts:
+                delay = min(8.0, (2 ** (attempt - 1)) + (time.time() % 0.75))
+                log.warning("Transient GCS command failure attempt %s/%s; retrying in %.2fs: %s", attempt, attempts, delay, last_error)
+                time.sleep(delay)
+        assert last_error is not None
+        raise last_error
+
     def read_text(self, blob_name: str, default: str = "") -> str:
         if self.use_python_storage and self.bucket is not None:
             try:
@@ -592,7 +642,7 @@ class GCS:
                 return blob.download_as_text()
             except Exception as e:
                 log.warning("Python GCS read failed for %s: %s", blob_name, e)
-        res = self._run(["gsutil", "cat", self._uri(blob_name)])
+        res = self._run(["gcloud", "storage", "cat", self._uri(blob_name)])
         if res.returncode != 0:
             return default
         return res.stdout
@@ -608,9 +658,7 @@ class GCS:
             f.write(text)
             tmp = f.name
         try:
-            res = self._run(["gsutil", "-h", f"Content-Type:{content_type}", "cp", tmp, self._uri(blob_name)])
-            if res.returncode != 0:
-                raise RuntimeError(res.stderr.strip() or res.stdout.strip())
+            self._run_with_retry(["gcloud", "storage", "cp", "--content-type", content_type, tmp, self._uri(blob_name)])
         finally:
             try:
                 os.unlink(tmp)
@@ -633,7 +681,7 @@ class GCS:
     def read_json_with_generation(self, blob_name: str, default: Any = None) -> Tuple[Any, Optional[int]]:
         """v12: returns (payload, generation) for compare-and-set writes.
 
-        Falls back to (default, None) when running through gsutil where we cannot
+        Falls back to (default, None) when running through gcloud storage where we cannot
         reliably surface the generation number. Concurrency protection is only
         active when USE_PYTHON_GCS_CLIENT=true.
         """
@@ -653,7 +701,7 @@ class GCS:
     def write_json_cas(self, blob_name: str, payload: Any, if_generation_match: Optional[int]) -> bool:
         """Compare-and-set write. Returns True on success, False on generation mismatch."""
         if not (self.use_python_storage and self.bucket is not None):
-            # gsutil path has no CAS support; fall through to unconditional write.
+            # The CLI path has no CAS support here; fall through to unconditional write.
             self.write_json(blob_name, payload)
             return True
         try:
@@ -731,7 +779,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
     float_keys = [
         "CONTRACT_SIZE_BTC", "ATR_STOP_MULTIPLIER", "TSL_ACTIVATION_PCT",
         "TSL_TRAIL_PCT", "TP1_PCT", "TP1_FRACTION",
-        "TP1_PROBE_TRIGGER_PCT", "TP1_PARTIAL_TRIGGER_PCT", "TP1_STRONG_TRIGGER_PCT", "TP1_FULL_TRIGGER_PCT",
+        "TP1_PROBE_TRIGGER_PCT", "TP1_PARTIAL_TRIGGER_PCT", "TP1_STRONG_TRIGGER_PCT", "TP1_FULL_TRIGGER_PCT", "TP1_R_MULTIPLE",
         "PHANTOM_EXTENSION_PCT", "FUNDING_LONG_MAX",
         "FUNDING_SHORT_MIN", "FUNDING_SIZE_REDUCE_AT",
         "PROBE_PCT", "PARTIAL_PCT", "STRONG_PCT",
@@ -751,12 +799,14 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "BRIDGE_ENTRY_COOLDOWN_SEC", "MIN_ENTRY_COOLDOWN_SECONDS",
         "SPOT_MIN_ENTRY_SCORE", "SPOT_FULL_SCORE", "MACRO_FAST_SMA", "MACRO_SLOW_SMA",
         "TELEGRAM_DAILY_SUMMARY_HOUR_ET",
+        "ADAPTIVE_REDUCE_SCORE", "ADAPTIVE_EXIT_SCORE", "ADAPTIVE_CONFIRM_CYCLES", "ADAPTIVE_REENTRY_COOLDOWN_MINUTES",
+        "SWING_PIVOT_LEFT_BARS", "SWING_PIVOT_RIGHT_BARS",
     ]
     # STREAK_PAUSE_MINUTES is normalized for display only; apply_strategy_config always
     # derives the effective pause length from STREAK_PAUSE_HOURS (single source of truth,
     # see v30 fix note there) so editing only the hours field on the dashboard takes effect.
     float_keys += ["STREAK_PAUSE_HOURS", "STREAK_PAUSE_MINUTES"]
-    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER"]
+    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE"]
     for k in float_keys:
         cfg[k] = safe_float(cfg.get(k), safe_float(DEFAULT_STRATEGY_CONFIG.get(k), 0.0))
     for k in int_keys:
@@ -774,7 +824,8 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     configurable. Product IDs and exchange plumbing remain code/env controlled.
     """
     global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, MAX_ABS_NET_CONTRACTS, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
-    global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, PHANTOM_EXTENSION_PCT
+    global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
+    global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES
     global MIN_ENTRY_COOLDOWN_SECONDS, SPOT_TRANCHE_TARGETS_PCT, MIN_FUTURES_EQUITY_BUFFER_USD, MAX_EFFECTIVE_LEVERAGE
     global RSI_LONG_MAX, RSI_SHORT_MIN, STOCH_LONG_MAX, STOCH_SHORT_MIN, VOL_SPIKE_MIN
@@ -782,7 +833,15 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     global SPOT_MIN_ENTRY_SCORE, SPOT_FULL_SCORE, SPOT_MIN_ORDER_USD, MACRO_FAST_SMA, MACRO_SLOW_SMA
 
     CONTRACT_SIZE_BTC = safe_float(cfg.get("CONTRACT_SIZE_BTC"), CONTRACT_SIZE_BTC)
-    MAX_CONVICTION_CONTRACTS = safe_int(cfg.get("MAX_CONVICTION_CONTRACTS"), MAX_CONVICTION_CONTRACTS)
+    MAX_CONVICTION_CONTRACTS = max(1, safe_int(cfg.get("MAX_CONVICTION_CONTRACTS"), MAX_CONVICTION_CONTRACTS))
+    configured_abs_cap = max(1, safe_int(cfg.get("MAX_ABS_NET_CONTRACTS"), MAX_ABS_NET_CONTRACTS))
+    if MAX_CONVICTION_CONTRACTS > configured_abs_cap:
+        log.warning(
+            "Max conviction %s exceeds hard absolute cap %s; clamping conviction to the hard cap",
+            MAX_CONVICTION_CONTRACTS,
+            configured_abs_cap,
+        )
+        MAX_CONVICTION_CONTRACTS = configured_abs_cap
     PROBE_PCT = safe_float(cfg.get("PROBE_PCT"), PROBE_PCT)
     PARTIAL_PCT = safe_float(cfg.get("PARTIAL_PCT"), PARTIAL_PCT)
     STRONG_PCT = safe_float(cfg.get("STRONG_PCT"), STRONG_PCT)
@@ -797,7 +856,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     CONTRACTS_PER_TRADE_PROBE = derived_probe
     CONTRACTS_PER_TRADE_PARTIAL = derived_partial
     CONTRACTS_PER_TRADE_FULL = MAX_CONVICTION_CONTRACTS
-    MAX_ABS_NET_CONTRACTS = MAX_CONVICTION_CONTRACTS
+    MAX_ABS_NET_CONTRACTS = configured_abs_cap
     SCORE4_MACRO_OVERRIDE_ENABLED = _bool_from_any(cfg.get("SCORE4_MACRO_OVERRIDE_ENABLED"), SCORE4_MACRO_OVERRIDE_ENABLED)
     PROGRESSIVE_ADD_ONS_ENABLED = _bool_from_any(cfg.get("PROGRESSIVE_ADD_ONS_ENABLED"), PROGRESSIVE_ADD_ONS_ENABLED)
     MACRO_BLOCKED_PROBE_CONTRACTS = safe_int(cfg.get("MACRO_BLOCKED_PROBE_CONTRACTS"), CONTRACTS_PER_TRADE_PROBE)
@@ -832,6 +891,17 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     TP1_PARTIAL_TRIGGER_PCT = safe_float(cfg.get("TP1_PARTIAL_TRIGGER_PCT"), TP1_PARTIAL_TRIGGER_PCT)
     TP1_STRONG_TRIGGER_PCT = safe_float(cfg.get("TP1_STRONG_TRIGGER_PCT"), TP1_STRONG_TRIGGER_PCT)
     TP1_FULL_TRIGGER_PCT = safe_float(cfg.get("TP1_FULL_TRIGGER_PCT"), TP1_FULL_TRIGGER_PCT)
+    TP1_USE_R_MULTIPLE = _bool_from_any(cfg.get("TP1_USE_R_MULTIPLE"), TP1_USE_R_MULTIPLE)
+    TP1_R_MULTIPLE = max(0.25, safe_float(cfg.get("TP1_R_MULTIPLE"), TP1_R_MULTIPLE))
+    ADAPTIVE_DEFENSE_ENABLED = _bool_from_any(cfg.get("ADAPTIVE_DEFENSE_ENABLED"), ADAPTIVE_DEFENSE_ENABLED)
+    ADAPTIVE_REDUCE_SCORE = max(1, min(100, safe_int(cfg.get("ADAPTIVE_REDUCE_SCORE"), ADAPTIVE_REDUCE_SCORE)))
+    ADAPTIVE_EXIT_SCORE = max(ADAPTIVE_REDUCE_SCORE, min(100, safe_int(cfg.get("ADAPTIVE_EXIT_SCORE"), ADAPTIVE_EXIT_SCORE)))
+    ADAPTIVE_CONFIRM_CYCLES = max(1, safe_int(cfg.get("ADAPTIVE_CONFIRM_CYCLES"), ADAPTIVE_CONFIRM_CYCLES))
+    ADAPTIVE_REENTRY_COOLDOWN_MINUTES = max(1, safe_int(cfg.get("ADAPTIVE_REENTRY_COOLDOWN_MINUTES"), ADAPTIVE_REENTRY_COOLDOWN_MINUTES))
+    SWING_PIVOT_ENABLED = _bool_from_any(cfg.get("SWING_PIVOT_ENABLED"), SWING_PIVOT_ENABLED)
+    SWING_PIVOT_LEFT_BARS = max(1, safe_int(cfg.get("SWING_PIVOT_LEFT_BARS"), SWING_PIVOT_LEFT_BARS))
+    SWING_PIVOT_RIGHT_BARS = max(1, safe_int(cfg.get("SWING_PIVOT_RIGHT_BARS"), SWING_PIVOT_RIGHT_BARS))
+    STOP_BLOWN_SHADOW_MODE = _bool_from_any(cfg.get("STOP_BLOWN_SHADOW_MODE"), STOP_BLOWN_SHADOW_MODE)
     PHANTOM_EXTENSION_PCT = safe_float(cfg.get("PHANTOM_EXTENSION_PCT"), PHANTOM_EXTENSION_PCT)
     FUNDING_LONG_MAX = safe_float(cfg.get("FUNDING_LONG_MAX"), FUNDING_LONG_MAX)
     FUNDING_SHORT_MIN = safe_float(cfg.get("FUNDING_SHORT_MIN"), FUNDING_SHORT_MIN)
@@ -1143,7 +1213,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v20_clean_btc_perp",
+        "version": "larry_perp_v33_adaptive_risk_structure",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -1180,7 +1250,12 @@ def default_engine_state() -> Dict[str, Any]:
             "phantom_extension_add_done": False,
             "phantom_extension_target_price": None,
             "phantom_extension_target_contracts": None,
+            "position_version": 0,
+            "position_fingerprint": None,
+            "adaptive_defense": {},
         },
+        "market_structure": {},
+        "stop_blown": {"active": False, "mode": "SHADOW"},
         "cooldowns": {
             "spot_last_entry_at": None,
             "perp_last_entry_at": None,  # back-compat: latest of long/short
@@ -2019,6 +2094,25 @@ def order_id_from_response(order: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def normalize_order_response(response: Any, client_order_id: str) -> Dict[str, Any]:
+    """Require Coinbase's explicit success response; a non-throwing SDK call is not enough."""
+    payload = obj_to_dict(response)
+    if not isinstance(payload, dict):
+        return {"ok": False, "response": payload, "client_order_id": client_order_id, "error": "Coinbase returned a non-dict order response"}
+    success_response = payload.get("success_response") or {}
+    error_response = payload.get("error_response") or {}
+    order_id = success_response.get("order_id") or payload.get("order_id")
+    explicit_success = payload.get("success")
+    ok = bool(order_id) and explicit_success is not False and not error_response
+    return {
+        "ok": ok,
+        "response": payload,
+        "client_order_id": client_order_id,
+        "order_id": order_id,
+        "error": None if ok else (error_response or payload.get("message") or "Coinbase did not explicitly confirm order success"),
+    }
+
+
 def get_recent_fills_for_order(cb: Any, order_id: Optional[str]) -> Dict[str, Any]:
     """Best-effort fill lookup for cleaner realized P&L / fee emails.
 
@@ -2260,14 +2354,14 @@ def place_market_order(cb: Any, side: str, contracts: int, reason: str) -> Dict[
         log.warning("DRY_RUN: would %s %s contracts for %s", side, contracts, reason)
         return {"ok": True, "dry_run": True, "side": side, "contracts": contracts, "reason": reason}
 
-    client_order_id = f"larry-v2-{int(time.time())}-{side.lower()}-{contracts}"
+    client_order_id = f"larry-v32-{int(time.time())}-{uuid.uuid4().hex[:10]}-{side.lower()}-{contracts}"
     # SDK helpers differ across versions. Prefer generic market_order if available.
     try:
         if side == "BUY":
             res = cb.market_order_buy(client_order_id=client_order_id, product_id=PERP_PRODUCT_ID, base_size=str(contracts))
         else:
             res = cb.market_order_sell(client_order_id=client_order_id, product_id=PERP_PRODUCT_ID, base_size=str(contracts))
-        return {"ok": True, "response": obj_to_dict(res), "client_order_id": client_order_id}
+        return normalize_order_response(res, client_order_id)
     except TypeError:
         # Fall back to generic create_order shape if SDK expects order_configuration.
         cfg_side = "BUY" if side == "BUY" else "SELL"
@@ -2278,7 +2372,7 @@ def place_market_order(cb: Any, side: str, contracts: int, reason: str) -> Dict[
                 side=cfg_side,
                 order_configuration={"market_market_ioc": {"base_size": str(contracts)}},
             )
-            return {"ok": True, "response": obj_to_dict(res), "client_order_id": client_order_id}
+            return normalize_order_response(res, client_order_id)
         except Exception as e:
             return {"ok": False, "error": str(e), "client_order_id": client_order_id}
     except Exception as e:
@@ -2300,10 +2394,53 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
         return {"ok": True, "plan": plan, "before": before, "after": before, "order": None}
 
     mark_at_send = safe_float(before.get("current_price"), 0.0)
+    _CYCLE_CONTEXT.update({
+        "phase": "ORDER_SUBMITTING",
+        "order_attempted": True,
+        "client_order_id": None,
+        "order_status": "SUBMITTING",
+    })
     order = place_market_order(cb, plan["action"], plan["contracts_needed"], reason)
-    time.sleep(3)
-    fills = get_recent_fills_for_order(cb, order_id_from_response(order)) if order.get("ok") else {"found": False}
-    after = get_live_net_position(cb)
+    _CYCLE_CONTEXT["client_order_id"] = order.get("client_order_id")
+    if not order.get("ok"):
+        _CYCLE_CONTEXT["order_status"] = "REJECTED_OR_UNCONFIRMED"
+        after = before
+        fills = {"found": False, "fills": [], "avg_price": None, "contracts": 0.0, "commission": 0.0}
+    else:
+        _CYCLE_CONTEXT["order_status"] = "ACKNOWLEDGED"
+        order_id = order_id_from_response(order)
+        fills = {"found": False, "fills": [], "avg_price": None, "contracts": 0.0, "commission": 0.0}
+        after = before
+        deadline = time.monotonic() + max(5, int(os.getenv("ORDER_RECONCILE_TIMEOUT_SECONDS", "20")))
+        while time.monotonic() < deadline:
+            time.sleep(2)
+            current_fills = get_recent_fills_for_order(cb, order_id)
+            if current_fills.get("found"):
+                fills = current_fills
+            try:
+                after = get_live_net_position(cb)
+            except Exception as exc:
+                _CYCLE_CONTEXT["order_status"] = "UNKNOWN_RECONCILIATION_REQUIRED"
+                _CYCLE_CONTEXT["reconcile_error"] = str(exc)
+                continue
+            if safe_int(after.get("signed_contracts"), 0) != safe_int(before.get("signed_contracts"), 0):
+                break
+
+    before_signed_actual = safe_int(before.get("signed_contracts"), 0)
+    after_signed_actual = safe_int(after.get("signed_contracts"), 0)
+    actual_delta = abs(after_signed_actual - before_signed_actual)
+    requested_qty = safe_int(plan.get("contracts_needed"), 0)
+    if not order.get("ok"):
+        execution_status = "REJECTED_OR_UNCONFIRMED"
+    elif actual_delta <= 0:
+        execution_status = "UNKNOWN_NO_POSITION_CHANGE"
+    elif actual_delta < requested_qty:
+        execution_status = "PARTIALLY_FILLED"
+    elif after_signed_actual == safe_int(plan.get("target_signed"), 0):
+        execution_status = "FILLED"
+    else:
+        execution_status = "FILLED_POSITION_MISMATCH"
+    _CYCLE_CONTEXT["order_status"] = execution_status
 
     # v12: slippage in basis points (signed) -- positive means we paid worse than the pre-trade mark.
     fill_price = safe_float(fills.get("avg_price"), 0.0)
@@ -2317,11 +2454,16 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
     net_realized = (gross_realized - fees) if gross_realized is not None else None
     intent_meta = classify_trade_intent(plan, reason)
     result = {
-        "ok": bool(order.get("ok")), "plan": plan, "before": before, "after": after,
+        "ok": bool(order.get("ok")) and actual_delta > 0, "plan": plan, "before": before, "after": after,
         "order": order, "fills": fills, "reason": reason, "mark_at_send": mark_at_send,
         "slippage_bps": slippage_bps, "gross_realized_pnl_usd": gross_realized,
         "fees_usd": fees, "net_realized_pnl_usd": net_realized,
         "is_exit_trade": gross_realized is not None,
+        "execution_status": execution_status,
+        "requested_contracts": requested_qty,
+        "filled_contracts": safe_float(fills.get("contracts"), actual_delta) or actual_delta,
+        "position_delta_contracts": actual_delta,
+        "partial_fill": execution_status == "PARTIALLY_FILLED",
         **intent_meta,
     }
     ledger_header = [
@@ -2335,16 +2477,23 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
         iso_utc(), reason, signal_class or reason, plan["action"], plan["contracts_needed"],
         before["signed_contracts"], plan["target_signed"], after["signed_contracts"],
         mark_at_send, fill_price, slippage_bps, gross_realized, fees, net_realized,
-        order.get("ok"), order.get("client_order_id"),
+        result.get("ok"), order.get("client_order_id"),
         result.get("trade_intent"), result.get("execution_reason"), result.get("signal_reason"),
         result.get("target_before"), result.get("target_after"),
         result.get("sizing_rung_before"), result.get("sizing_rung_after"),
-        json.dumps(order, default=str)
+        json.dumps({
+            **order,
+            "execution_status": execution_status,
+            "requested_contracts": requested_qty,
+            "filled_contracts": result.get("filled_contracts"),
+            "position_delta_contracts": actual_delta,
+            "partial_fill": result.get("partial_fill"),
+        }, default=str)
     ])
     before_signed = safe_int(before.get("signed_contracts"), 0)
     after_signed = safe_int(after.get("signed_contracts"), 0)
     confirmed_change = after_signed != before_signed
-    should_email = order.get("ok") and plan.get("contracts_needed", 0) > 0 and (
+    should_email = result.get("ok") and plan.get("contracts_needed", 0) > 0 and (
         confirmed_change or not SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL
     )
     if should_email:
@@ -2359,12 +2508,135 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
 # =============================================================================
 
 
-def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any], sig: SignalSnapshot) -> Dict[str, Any]:
+def classify_swing_pivots(candles: List[Dict[str, float]]) -> Dict[str, Any]:
+    """Return only confirmed, non-repainting pivots from completed bars."""
+    if not SWING_PIVOT_ENABLED or len(candles) < 8:
+        return {"enabled": SWING_PIVOT_ENABLED, "status": "INSUFFICIENT_DATA"}
+    left, right = SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS
+    highs: List[Dict[str, Any]] = []
+    lows: List[Dict[str, Any]] = []
+    # Exclude the newest bar because the exchange may still be building it.
+    bars = candles[:-1]
+    for i in range(left, len(bars) - right):
+        window = bars[i-left:i+right+1]
+        h, lo = safe_float(bars[i].get("high"), 0), safe_float(bars[i].get("low"), 0)
+        if h and h == max(safe_float(x.get("high"), 0) for x in window):
+            highs.append({"price": h, "start": bars[i].get("start"), "index": i})
+        if lo and lo == min(safe_float(x.get("low"), float("inf")) for x in window):
+            lows.append({"price": lo, "start": bars[i].get("start"), "index": i})
+    last_high, prev_high = (highs[-1] if highs else None), (highs[-2] if len(highs) > 1 else None)
+    last_low, prev_low = (lows[-1] if lows else None), (lows[-2] if len(lows) > 1 else None)
+    structure = "UNCLASSIFIED"
+    if last_high and prev_high and last_low and prev_low:
+        if last_high["price"] > prev_high["price"] and last_low["price"] > prev_low["price"]:
+            structure = "BULLISH_HH_HL"
+        elif last_high["price"] < prev_high["price"] and last_low["price"] < prev_low["price"]:
+            structure = "BEARISH_LH_LL"
+        else:
+            structure = "RANGE_OR_TRANSITION"
+    return {
+        "enabled": True, "status": "SHADOW", "structure": structure,
+        "last_swing_high": last_high, "previous_swing_high": prev_high,
+        "last_swing_low": last_low, "previous_swing_low": prev_low,
+        "confirmed_at": iso_utc(), "left_bars": left, "right_bars": right,
+    }
+
+
+def update_position_version(controls: Dict[str, Any], live_pos: Dict[str, Any], atr_locked: float) -> None:
+    signed = safe_int(live_pos.get("signed_contracts"), 0)
+    avg = safe_float(live_pos.get("avg_entry_price"), 0.0)
+    fingerprint = f"{signed}:{avg:.8f}"
+    if controls.get("position_fingerprint") != fingerprint:
+        previous = controls.get("position_fingerprint")
+        controls["position_version"] = safe_int(controls.get("position_version"), 0) + 1
+        controls["position_fingerprint"] = fingerprint
+        controls["position_reanchor"] = {
+            "version": controls["position_version"], "previous_fingerprint": previous,
+            "new_fingerprint": fingerprint, "signed_contracts": signed,
+            "exchange_avg_entry": avg, "locked_atr": atr_locked,
+            "reanchored_at": iso_utc(), "verified": bool(signed and avg and atr_locked),
+        }
+
+
+def adaptive_defense_snapshot(state: Dict[str, Any], live_pos: Dict[str, Any], sig: SignalSnapshot,
+                              candles: List[Dict[str, float]], structure: Dict[str, Any]) -> Dict[str, Any]:
+    """Score independent evidence that the open-position thesis is deteriorating."""
+    signed = safe_int(live_pos.get("signed_contracts"), 0)
+    if not signed:
+        return {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": 0, "state": "FLAT", "evidence": []}
+    side = "LONG" if signed > 0 else "SHORT"
+    evidence: List[Dict[str, Any]] = []
+    score = 0
+    closes = [safe_float(c.get("close"), 0) for c in candles[-6:] if safe_float(c.get("close"), 0) > 0]
+    last_open = safe_float(candles[-1].get("open"), sig.price) if candles else sig.price
+    adverse_candle = sig.price < last_open if side == "LONG" else sig.price > last_open
+    if len(closes) >= 4:
+        moves = [closes[i] - closes[i-1] for i in range(1, len(closes))]
+        adverse_moves = sum(1 for m in moves[-3:] if (m < 0 if side == "LONG" else m > 0))
+        if adverse_moves >= 2:
+            score += 20; evidence.append({"factor": "adverse_momentum", "points": 20})
+        if len(moves) >= 2 and abs(moves[-1]) > abs(moves[-2]) and (moves[-1] < 0 if side == "LONG" else moves[-1] > 0):
+            score += 10; evidence.append({"factor": "momentum_accelerating", "points": 10})
+    if adverse_candle and sig.volume_ratio >= VOL_SPIKE_MIN:
+        score += 20; evidence.append({"factor": "adverse_volume_expansion", "points": 20, "volume_ratio": sig.volume_ratio})
+    pivot = (structure.get("last_swing_low") or {}).get("price") if side == "LONG" else (structure.get("last_swing_high") or {}).get("price")
+    if pivot and (sig.price < pivot if side == "LONG" else sig.price > pivot):
+        score += 35; evidence.append({"factor": "confirmed_structure_break", "points": 35, "pivot": pivot})
+    if sig.mid_bb and (sig.price < sig.mid_bb if side == "LONG" else sig.price > sig.mid_bb):
+        score += 10; evidence.append({"factor": "wrong_side_of_mid_band", "points": 10})
+    if sig.rsi is not None and ((side == "LONG" and sig.rsi < 40) or (side == "SHORT" and sig.rsi > 60)):
+        score += 10; evidence.append({"factor": "adverse_rsi_regime", "points": 10, "rsi": sig.rsi})
+    score = min(100, score)
+    prior = ((state.get("position_controls") or {}).get("adaptive_defense") or {})
+    cycles = safe_int(prior.get("confirm_cycles"), 0) + 1 if score >= ADAPTIVE_REDUCE_SCORE else 0
+    action = "HOLD"
+    if score >= ADAPTIVE_EXIT_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
+        action = "EXIT"
+    elif score >= ADAPTIVE_REDUCE_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
+        action = "REDUCE_ONE_RUNG"
+    elif score >= ADAPTIVE_REDUCE_SCORE:
+        action = "CONFIRMING"
+    return {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": score, "state": action,
+            "confirm_cycles": cycles, "required_cycles": ADAPTIVE_CONFIRM_CYCLES,
+            "evidence": evidence, "side": side, "evaluated_at": iso_utc()}
+
+
+def update_stop_blown_shadow(state: Dict[str, Any], price: float, atr_now: float) -> None:
+    sb = state.setdefault("stop_blown", {"active": False, "mode": "SHADOW"})
+    if not sb.get("active") or price <= 0:
+        return
+    anchor, direction = safe_float(sb.get("anchor"), 0), sb.get("stopped_side")
+    envelope = safe_float(sb.get("atr"), 0) or atr_now
+    if not anchor or not envelope:
+        return
+    adverse = (anchor - price) if direction == "LONG" else (price - anchor)
+    recovery = (price - anchor) if direction == "LONG" else (anchor - price)
+    scores = {
+        "FISHED": max(0.0, min(1.0, recovery / (0.25 * envelope))),
+        "SAVED": max(0.0, min(1.0, adverse / (0.75 * envelope))),
+        "EXTREME": max(0.0, min(1.0, (adverse / envelope - 0.75) / 0.75)),
+    }
+    scores["UNCLEAR"] = max(0.0, 1.0 - max(scores.values()))
+    recent_fished = 0
+    for event in (state.get("stop_blown_history") or [])[-20:]:
+        event_dt = parse_dt(event.get("at"))
+        if (event.get("side") == direction and event.get("leader") == "FISHED" and event_dt
+                and now_utc() - event_dt <= timedelta(minutes=30)):
+            recent_fished += 1
+    scores["BURNED"] = min(1.0, recent_fished / 3.0)
+    sb.update({"scores": scores, "leader": max(scores, key=scores.get), "last_price": price,
+               "updated_at": iso_utc(), "mode": "SHADOW", "trading_action": "NONE"})
+
+
+def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any], sig: SignalSnapshot,
+                                  candles: Optional[List[Dict[str, float]]] = None) -> Dict[str, Any]:
     controls = state.setdefault("position_controls", default_engine_state()["position_controls"])
     signed = live_pos.get("signed_contracts", 0)
     price = sig.price or live_pos.get("current_price") or 0.0
     avg = live_pos.get("avg_entry_price") or 0.0
     a = sig.atr or 0.0
+    structure = classify_swing_pivots(candles or [])
+    state["market_structure"] = structure
 
     if signed == 0 or price <= 0 or avg <= 0:
         controls.update({
@@ -2373,6 +2645,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
             "tsl_active": False, "tsl_stop": None,
             "tp1_done": False, "tp1_trigger_price": None, "tp1_pct_active": None, "tp1_target_contracts": None,
             "phantom_extension_add_done": False, "phantom_extension_target_price": None, "phantom_extension_target_contracts": None,
+            "adaptive_defense": {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": 0, "state": "FLAT", "evidence": []},
         })
         return controls
 
@@ -2386,6 +2659,8 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
         controls["tp1_done"] = False  # reset on any new entry
 
     atr_locked = safe_float(controls.get("atr_at_entry"), 0.0) or a
+    update_position_version(controls, live_pos, atr_locked)
+    controls["adaptive_defense"] = adaptive_defense_snapshot(state, live_pos, sig, candles or [], structure)
 
     side = "LONG" if signed > 0 else "SHORT"
     if side == "LONG":
@@ -2396,7 +2671,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
         tp_pct = tp1_trigger_pct_for_position(abs(signed))
         controls["tp1_pct_active"] = tp_pct
         controls["tp1_target_contracts"] = next_lower_ladder_target(abs(signed))
-        controls["tp1_trigger_price"] = avg * (1 + tp_pct)
+        controls["tp1_trigger_price"] = (avg + atr_locked * ATR_MULTIPLIER * TP1_R_MULTIPLE) if (TP1_USE_R_MULTIPLE and atr_locked) else avg * (1 + tp_pct)
         # Activate TSL based on the BEST price seen since this position was detected,
         # not only the current tick. This is critical for manual/exchange positions:
         # if price traded above activation and then pulled back before the next cycle,
@@ -2421,7 +2696,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
         tp_pct = tp1_trigger_pct_for_position(abs(signed))
         controls["tp1_pct_active"] = tp_pct
         controls["tp1_target_contracts"] = next_lower_ladder_target(abs(signed))
-        controls["tp1_trigger_price"] = avg * (1 - tp_pct)
+        controls["tp1_trigger_price"] = (avg - atr_locked * ATR_MULTIPLIER * TP1_R_MULTIPLE) if (TP1_USE_R_MULTIPLE and atr_locked) else avg * (1 - tp_pct)
         # For shorts, activate TSL based on the LOWEST price seen since detection.
         low = safe_float(controls.get("lowest_price"), avg) or avg
         gain_pct = (avg / low) - 1 if low else 0.0
@@ -2452,12 +2727,19 @@ def risk_exit_target_if_needed(live_pos: Dict[str, Any], controls: Dict[str, Any
     tsl_stop = controls.get("tsl_stop") if controls.get("tsl_active") else None
     tp1_trigger = controls.get("tp1_trigger_price")
     tp1_done = bool(controls.get("tp1_done"))
+    defense = controls.get("adaptive_defense") or {}
 
     if side == "LONG":
         if atr_stop and price <= atr_stop:
             return 0, "ATR_STOP_LONG"
         if tsl_stop and price <= tsl_stop:
             return 0, "TSL_STOP_LONG"
+        if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "EXIT":
+            return 0, "ADAPTIVE_DEFENSE_EXIT_LONG"
+        if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "REDUCE_ONE_RUNG":
+            keep = next_lower_ladder_target(abs(signed))
+            if keep < abs(signed):
+                return keep, "ADAPTIVE_DEFENSE_REDUCE_LONG"
         if (not tp1_done) and tp1_trigger and price >= tp1_trigger:
             keep = next_lower_ladder_target(abs(signed))
             if keep < abs(signed):
@@ -2467,6 +2749,12 @@ def risk_exit_target_if_needed(live_pos: Dict[str, Any], controls: Dict[str, Any
             return 0, "ATR_STOP_SHORT"
         if tsl_stop and price >= tsl_stop:
             return 0, "TSL_STOP_SHORT"
+        if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "EXIT":
+            return 0, "ADAPTIVE_DEFENSE_EXIT_SHORT"
+        if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "REDUCE_ONE_RUNG":
+            keep = next_lower_ladder_target(abs(signed))
+            if keep < abs(signed):
+                return -keep, "ADAPTIVE_DEFENSE_REDUCE_SHORT"
         if (not tp1_done) and tp1_trigger and price <= tp1_trigger:
             keep = next_lower_ladder_target(abs(signed))
             if keep < abs(signed):
@@ -2482,6 +2770,60 @@ def record_exit_risk_result(state: Dict[str, Any], reason: str) -> None:
         if safe_int(risk.get("loss_streak")) >= LOSS_STREAK_LIMIT:
             risk["pause_until"] = (now_utc() + timedelta(minutes=STREAK_PAUSE_MINUTES)).isoformat()
             risk["halt_reason"] = "post_stop_cooldown"
+
+
+def recover_bot_managed_position_from_ledger(gcs: GCS, state: Dict[str, Any], live_pos: Dict[str, Any]) -> bool:
+    """Recover ownership only when Larry's last successful ledger row exactly matches live net size."""
+    live_signed = safe_int(live_pos.get("signed_contracts"), 0)
+    if live_signed == 0 or state.get("bot_managed_position"):
+        return False
+    try:
+        raw = gcs.read_text(PERP_TRADES_LEDGER_BLOB, default="")
+        if not raw.strip():
+            return False
+        rows = list(csv.DictReader(raw.splitlines()))
+        last = next((r for r in reversed(rows) if str(r.get("ok", "")).strip().lower() in ("true", "1", "yes")), None)
+        if not last:
+            return False
+        ledger_after = safe_int(last.get("after_signed"), 0)
+        client_order_id = str(last.get("client_order_id") or "")
+        if ledger_after != live_signed or not client_order_id.startswith(("larry-v2-", "larry-v32-")):
+            return False
+        state["bot_managed_position"] = {
+            "signed_contracts": live_signed,
+            "side": live_pos.get("side"),
+            "contracts": live_pos.get("contracts"),
+            "avg_entry_price": live_pos.get("avg_entry_price"),
+            "current_price": live_pos.get("current_price"),
+            "unrealized_pnl": live_pos.get("unrealized_pnl"),
+            "daily_realized_pnl": live_pos.get("daily_realized_pnl"),
+            "product_id": live_pos.get("product_id"),
+            "marked_at": iso_utc(),
+            "source_reason": last.get("reason"),
+            "ownership_source": "recovered_from_canonical_larry_ledger",
+            "recovered_client_order_id": client_order_id,
+            "recovered_trade_timestamp": last.get("timestamp"),
+        }
+        state["ownership_recovery"] = {
+            "recovered": True,
+            "at": iso_utc(),
+            "live_signed": live_signed,
+            "ledger_after_signed": ledger_after,
+            "client_order_id": client_order_id,
+        }
+        log.error("SAFETY RECOVERY: restored bot ownership from Larry ledger for live signed position %s", live_signed)
+        try:
+            send_telegram_message(
+                f"⚠️ LARRY OWNERSHIP RECOVERED\nLive position: {live_pos.get('side')} {live_pos.get('contracts')}\n"
+                f"Matched Larry order: {client_order_id}\nATR/TSL management restored after ledger verification.\nTime: {et_timestamp_short()}",
+                event_type="OWNERSHIP_RECOVERED",
+            )
+        except Exception as notify_exc:
+            log.warning("Ownership recovery notification failed: %s", notify_exc)
+        return True
+    except Exception as exc:
+        log.warning("Bot ownership recovery check failed closed: %s", exc)
+        return False
 
 
 def live_position_management_status(state: Dict[str, Any], live_pos: Dict[str, Any]) -> Dict[str, Any]:
@@ -3708,7 +4050,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v20_clean_btc_perp",
+        "version": "larry_perp_v33_adaptive_risk_structure",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -3782,7 +4124,21 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
 # =============================================================================
 
 
+_CYCLE_CONTEXT: Dict[str, Any] = {
+    "phase": "IDLE",
+    "order_attempted": False,
+    "client_order_id": None,
+    "order_status": "NONE",
+}
+
+
 def run_once(cb: Any, gcs: GCS) -> None:
+    _CYCLE_CONTEXT.update({
+        "phase": "LOADING_STATE",
+        "order_attempted": False,
+        "client_order_id": None,
+        "order_status": "NONE",
+    })
     state = load_engine_state(gcs)
     if not state:
         state = default_engine_state()
@@ -3799,7 +4155,10 @@ def run_once(cb: Any, gcs: GCS) -> None:
     kill = read_kill_switch(gcs)
     state["kill_switch"] = kill
 
+    _CYCLE_CONTEXT["phase"] = "READING_EXCHANGE_POSITION"
     live_pos = get_live_net_position(cb)
+    _CYCLE_CONTEXT["phase"] = "EVALUATING_RISK"
+    recover_bot_managed_position_from_ledger(gcs, state, live_pos)
     # v29: dashboard emergency flatten requests are executed by the VM bot, not Cloud Run.
     # Process before normal kill-switch handling so a halt set by the dashboard does not
     # prevent the requested flatten from executing.
@@ -3852,7 +4211,8 @@ def run_once(cb: Any, gcs: GCS) -> None:
     # automated ATR/TSL exits when the live position is bot-managed. Manual
     # Coinbase positions are monitor-only by default and must not be flattened
     # by Larry.
-    controls = update_position_risk_controls(state, live_pos, sig)
+    controls = update_position_risk_controls(state, live_pos, sig, candles)
+    update_stop_blown_shadow(state, sig.price, sig.atr or 0.0)
     mgmt = live_position_management_status(state, live_pos)
     state["manual_position_status"] = mgmt
     exit_target, exit_reason = (None, None)
@@ -3882,6 +4242,11 @@ def run_once(cb: Any, gcs: GCS) -> None:
         # TP1 ladder step-downs do NOT count as stops; mark tp1_done so we only fire once per position average.
         is_tp1 = (exit_reason or "").startswith(("TP1_PARTIAL_", "TP1_LADDER_STEPDOWN_"))
         if last_result.get("ok") and abs(after_signed) < abs(before_signed):
+            if (exit_reason or "").startswith("ADAPTIVE_DEFENSE_"):
+                state.setdefault("risk", {})["pause_until"] = (
+                    now_utc() + timedelta(minutes=ADAPTIVE_REENTRY_COOLDOWN_MINUTES)
+                ).isoformat()
+                state["risk"]["halt_reason"] = "adaptive_defense_cooldown"
             if is_tp1:
                 state.setdefault("position_controls", {})["tp1_done"] = True
                 # v30 fix: a profit-take is clear evidence any prior losing streak
@@ -3890,6 +4255,20 @@ def run_once(cb: Any, gcs: GCS) -> None:
                 state.setdefault("risk", {})["loss_streak"] = 0
             else:
                 record_exit_risk_result(state, exit_reason or "RISK_EXIT")
+            if after_signed == 0 and ("STOP" in (exit_reason or "") or "ADAPTIVE_DEFENSE_EXIT" in (exit_reason or "")):
+                previous_sb = state.get("stop_blown") or {}
+                history = state.setdefault("stop_blown_history", [])
+                if previous_sb.get("active") and previous_sb.get("leader"):
+                    history.append({"at": iso_utc(), "side": previous_sb.get("stopped_side"),
+                                    "leader": previous_sb.get("leader"), "anchor": previous_sb.get("anchor")})
+                    del history[:-20]
+                state["stop_blown"] = {
+                    "active": True, "mode": "SHADOW", "trading_action": "NONE",
+                    "stopped_side": "LONG" if before_signed > 0 else "SHORT",
+                    "anchor": sig.price, "atr": safe_float(controls.get("atr_at_entry"), sig.atr or 0.0),
+                    "reason": exit_reason, "started_at": iso_utc(), "scores": {},
+                    "note": "Observation only; cannot place a re-entry order.",
+                }
         # Reset phantom and position controls only on a full flatten (not TP1).
         if not is_tp1:
             state["phantom"] = default_engine_state()["phantom"]
@@ -4128,8 +4507,10 @@ def run_once(cb: Any, gcs: GCS) -> None:
 
     maybe_send_daily_telegram_summary(gcs, state, live_pos_after)
 
+    _CYCLE_CONTEXT["phase"] = "SAVING_ENGINE_STATE"
     dashboard_state = build_dashboard_engine_state(state, sig, live_pos_after, product, last_result)
     save_engine_state(gcs, dashboard_state)
+    _CYCLE_CONTEXT["phase"] = "SAVING_POSITION_STATE"
     write_position_state(gcs, live_pos_after, dashboard_state)
     try:
         write_heartbeat(gcs, sig.price or mark, state.get("phantom", {}).get("state", "MONITORING"), live_pos_after)
@@ -4147,6 +4528,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
         live_pos_after.get("avg_entry_price"),
         live_pos_after.get("unrealized_pnl"),
     )
+    _CYCLE_CONTEXT["phase"] = "COMPLETE"
 
 
 def main() -> None:
@@ -4166,7 +4548,21 @@ def main() -> None:
         except Exception as e:
             log.exception("Main loop error: %s", e)
             if TELEGRAM_INCLUDE_ERRORS:
-                send_telegram_message(f"🚨 LARRY ERROR\n{type(e).__name__}: {str(e)[:800]}\nAction: no order submitted this cycle; retrying next loop.\nTime: {et_timestamp_short()}", event_type="ERROR")
+                attempted = bool(_CYCLE_CONTEXT.get("order_attempted"))
+                action = (
+                    "Order activity occurred; verify client order ID and Coinbase position before any retry."
+                    if attempted
+                    else "No order was attempted before this failure; retrying next loop."
+                )
+                send_telegram_message(
+                    f"🚨 LARRY ERROR\n{type(e).__name__}: {str(e)[:800]}\n"
+                    f"Phase: {_CYCLE_CONTEXT.get('phase')}\n"
+                    f"Order attempted: {'YES' if attempted else 'NO'}\n"
+                    f"Order status: {_CYCLE_CONTEXT.get('order_status')}\n"
+                    f"Client order ID: {_CYCLE_CONTEXT.get('client_order_id') or 'none'}\n"
+                    f"Action: {action}\nTime: {et_timestamp_short()}",
+                    event_type="ERROR",
+                )
             try:
                 # Write a DOWN/ERROR-ish heartbeat while service is still alive.
                 gcs = GCS(BUCKET_NAME)
