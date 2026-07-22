@@ -351,7 +351,9 @@ The v34 authority-cleanup release makes Max Conviction the sole absolute size co
 
 Production deployment (July 22, 2026):
 
-- Code release commit: `a03ad05`
-- Cloud Run dashboard revision: `perp-bot-dashboard-00128-j46` (100% traffic)
+- Base release commit: `a03ad05`
+- Engine metadata correction: `52e0ce4`
+- Dashboard authority-label correction: `b168b5c`
+- Cloud Run dashboard revision: `perp-bot-dashboard-00129-qtj` (100% traffic)
 - Engine service: `larry-perp.service` active on `btc-perp-bot`
 - Engine state: `larry_perp_v34_authority_cleanup`
