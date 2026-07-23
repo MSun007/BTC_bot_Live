@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v36_bounded_gcs_io
+larry_perp_v39_stable_gcs_retry
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -293,14 +293,15 @@ Coinbase remains authoritative for live exposure. GCS state supports orchestrati
 ### Bounded GCS outage behavior
 
 Critical CLI-backed reads retry once before returning their fail-closed
-default. Reads and writes share a 35-second budget for the entire trading
-cycle, individual CLI calls are limited to 10 seconds, and later storage
-operations fail fast once the cycle budget is exhausted. The main loop sleeps
-only the remainder of its 60-second cadence and records an overrun warning
-instead of adding another unconditional 60-second delay.
+default, and writes retain bounded retry/backoff. Individual CLI calls are
+limited to 30 seconds. Startup heartbeat writes are fail-soft so telemetry
+latency cannot terminate Larry.
 
-This keeps transient recovery while preventing a prolonged storage outage from
-blocking one engine cycle for several minutes.
+The shared per-cycle GCS cap is disabled in production. It was introduced in
+v36 and removed in v39 after live VM measurements showed that normal aggregate
+latency across many separate `gcloud storage` calls could exhaust the cap and
+prevent `perp_engine_state.json` from being saved. The main loop still records
+cadence overruns, while each individual storage command remains bounded.
 
 ## Testing
 
@@ -379,18 +380,21 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-The v36 reliability release retains all v35 trading behavior and adds bounded
-GCS reads, a shared per-cycle storage budget and cadence-aware loop timing.
+The v39 stability release retains all v35 trading behavior, bounded critical
+read/write retries, fail-soft startup telemetry and cadence-aware loop timing.
+It removes the incompatible shared GCS cycle cap that caused normal multi-object
+storage work to fail during `SAVING_ENGINE_STATE`.
 
 Production deployment (July 23, 2026):
 
-- Release commit: `585bc1d`
+- Release commit: `b4e9089`
 - Engine service: `larry-perp.service` active on `btc-perp-bot`
-- Engine state: `larry_perp_v36_bounded_gcs_io`
+- Engine state: `larry_perp_v39_stable_gcs_retry`
 - Exchange position at deployment and verification: `FLAT`
-- First completed cycle: healthy, no storage error or overrun
-- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v36_20260723_1113`
-- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v36_20260723_1113.json`
+- First completed cycle: healthy, dashboard state saved, no GCS-budget error
+- Observed first-cycle duration: 131.24 seconds due to slow GCS CLI calls
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v39_20260723_1136`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v39_20260723_1136.json`
 
 The v35 fresh-setup guard preserves the v34 ownership, re-anchoring, ATR,
 profit-taking and adaptive-defence improvements while fixing the churn path
