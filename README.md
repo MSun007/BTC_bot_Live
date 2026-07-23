@@ -5,11 +5,8 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v35_fresh_setup_guard
+larry_perp_v36_bounded_gcs_io
 ```
-
-The tested v36 reliability successor is `larry_perp_v36_bounded_gcs_io`.
-It retains all v35 trading behavior.
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
 
@@ -382,11 +379,24 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
+The v36 reliability release retains all v35 trading behavior and adds bounded
+GCS reads, a shared per-cycle storage budget and cadence-aware loop timing.
+
+Production deployment (July 23, 2026):
+
+- Release commit: `585bc1d`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v36_bounded_gcs_io`
+- Exchange position at deployment and verification: `FLAT`
+- First completed cycle: healthy, no storage error or overrun
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v36_20260723_1113`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v36_20260723_1113.json`
+
 The v35 fresh-setup guard preserves the v34 ownership, re-anchoring, ATR,
 profit-taking and adaptive-defence improvements while fixing the churn path
 introduced by the time-only adaptive re-entry cooldown.
 
-Production deployment (July 23, 2026):
+v35 production baseline:
 
 - Release commit: `4c9a02a`
 - Cloud Run dashboard revision: `perp-bot-dashboard-00135-tbk` (100% traffic)
