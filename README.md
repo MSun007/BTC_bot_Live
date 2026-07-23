@@ -8,6 +8,9 @@ The current production engine is:
 larry_perp_v35_fresh_setup_guard
 ```
 
+The tested v36 reliability successor is `larry_perp_v36_bounded_gcs_io`.
+It retains all v35 trading behavior.
+
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
 
 ## System overview
@@ -290,6 +293,18 @@ gs://btc_trade_log/coinbase_unified_heartbeat.json
 
 Coinbase remains authoritative for live exposure. GCS state supports orchestration, telemetry, recovery and dashboard display; it must not override a conflicting live exchange position.
 
+### Bounded GCS outage behavior
+
+Critical CLI-backed reads retry once before returning their fail-closed
+default. Reads and writes share a 35-second budget for the entire trading
+cycle, individual CLI calls are limited to 10 seconds, and later storage
+operations fail fast once the cycle budget is exhausted. The main loop sleeps
+only the remainder of its 60-second cadence and records an overrun warning
+instead of adding another unconditional 60-second delay.
+
+This keeps transient recovery while preventing a prolonged storage outage from
+blocking one engine cycle for several minutes.
+
 ## Testing
 
 Run the regression suite:
@@ -313,6 +328,8 @@ The current tests verify:
 - Pre-clear phantom setups cannot be reused after recovery
 - The first fresh same-side retry is probe-only
 - Opposite-side setups are not blocked by the same-side guard
+- Critical GCS reads retry after a transient failure
+- Exhausted GCS cycle budgets fail fast
 
 Also run syntax checks before deployment:
 

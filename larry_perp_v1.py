@@ -298,6 +298,10 @@ STREAK_PAUSE_MINUTES = float(os.getenv("STREAK_PAUSE_MINUTES", str(STREAK_PAUSE_
 CANDLE_GRANULARITY = os.getenv("CANDLE_GRANULARITY", "ONE_HOUR")
 CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "300"))
 LOOP_SECONDS = int(os.getenv("LOOP_SECONDS", "60"))
+GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "10"))
+GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "35"))
+GCS_READ_ATTEMPTS = int(os.getenv("GCS_READ_ATTEMPTS", "2"))
+GCS_WRITE_ATTEMPTS = int(os.getenv("GCS_WRITE_ATTEMPTS", "3"))
 HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "60"))
 
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
@@ -591,6 +595,7 @@ class GCS:
         self.use_python_storage = os.getenv("USE_PYTHON_GCS_CLIENT", "false").lower() in ("1", "true", "yes")
         self.client = None
         self.bucket = None
+        self._cycle_io_deadline: Optional[float] = None
         if self.use_python_storage:
             try:
                 self.client = build_storage_client()
@@ -605,14 +610,34 @@ class GCS:
     def _uri(self, blob_name: str) -> str:
         return f"{self.prefix}/{blob_name}"
 
-    def _run(self, cmd: List[str], input_text: Optional[str] = None) -> subprocess.CompletedProcess:
+    def begin_cycle_budget(self, seconds: float = GCS_CYCLE_IO_BUDGET_SECONDS) -> None:
+        """Share one bounded GCS time allowance across the whole trading cycle."""
+        self._cycle_io_deadline = time.monotonic() + max(1.0, float(seconds))
+
+    def _remaining_cycle_budget(self) -> Optional[float]:
+        if self._cycle_io_deadline is None:
+            return None
+        return max(0.0, self._cycle_io_deadline - time.monotonic())
+
+    def _run(
+        self,
+        cmd: List[str],
+        input_text: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> subprocess.CompletedProcess:
+        remaining = self._remaining_cycle_budget()
+        if remaining is not None and remaining <= 0:
+            raise TimeoutError("GCS cycle I/O budget exhausted")
+        timeout = max(0.25, float(timeout_seconds or GCS_COMMAND_TIMEOUT_SECONDS))
+        if remaining is not None:
+            timeout = min(timeout, max(0.25, remaining))
         return subprocess.run(
             cmd,
             input=input_text,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=30,
+            timeout=timeout,
             check=False,
         )
 
@@ -625,6 +650,9 @@ class GCS:
         """Retry transient gcloud storage failures without hiding the final exception."""
         last_error: Optional[Exception] = None
         for attempt in range(1, max(1, attempts) + 1):
+            remaining = self._remaining_cycle_budget()
+            if remaining is not None and remaining <= 0:
+                raise TimeoutError("GCS cycle I/O budget exhausted") from last_error
             try:
                 res = self._run(cmd, input_text=input_text)
                 if res.returncode == 0:
@@ -634,6 +662,11 @@ class GCS:
                 last_error = exc
             if attempt < attempts:
                 delay = min(8.0, (2 ** (attempt - 1)) + (time.time() % 0.75))
+                remaining = self._remaining_cycle_budget()
+                if remaining is not None:
+                    delay = min(delay, max(0.0, remaining))
+                if delay <= 0:
+                    raise TimeoutError("GCS cycle I/O budget exhausted") from last_error
                 log.warning("Transient GCS command failure attempt %s/%s; retrying in %.2fs: %s", attempt, attempts, delay, last_error)
                 time.sleep(delay)
         assert last_error is not None
@@ -648,8 +681,13 @@ class GCS:
                 return blob.download_as_text()
             except Exception as e:
                 log.warning("Python GCS read failed for %s: %s", blob_name, e)
-        res = self._run(["gcloud", "storage", "cat", self._uri(blob_name)])
-        if res.returncode != 0:
+        try:
+            res = self._run_with_retry(
+                ["gcloud", "storage", "cat", self._uri(blob_name)],
+                attempts=GCS_READ_ATTEMPTS,
+            )
+        except Exception as e:
+            log.warning("GCS read failed for %s after bounded retry: %s", blob_name, e)
             return default
         return res.stdout
 
@@ -664,7 +702,10 @@ class GCS:
             f.write(text)
             tmp = f.name
         try:
-            self._run_with_retry(["gcloud", "storage", "cp", "--content-type", content_type, tmp, self._uri(blob_name)])
+            self._run_with_retry(
+                ["gcloud", "storage", "cp", "--content-type", content_type, tmp, self._uri(blob_name)],
+                attempts=GCS_WRITE_ATTEMPTS,
+            )
         finally:
             try:
                 os.unlink(tmp)
@@ -1216,7 +1257,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v35_fresh_setup_guard",
+        "version": "larry_perp_v36_bounded_gcs_io",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -4196,7 +4237,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v35_fresh_setup_guard",
+        "version": "larry_perp_v36_bounded_gcs_io",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4279,6 +4320,7 @@ _CYCLE_CONTEXT: Dict[str, Any] = {
 
 
 def run_once(cb: Any, gcs: GCS) -> None:
+    gcs.begin_cycle_budget()
     _CYCLE_CONTEXT.update({
         "phase": "LOADING_STATE",
         "order_attempted": False,
@@ -4723,6 +4765,7 @@ def main() -> None:
     send_telegram_message(f"🟢 Larry Perp started\nPosition: {live.get('side')} {live.get('contracts')}\nTime: {et_timestamp_short()}", event_type="BOT_STARTED")
 
     while True:
+        cycle_started = time.monotonic()
         try:
             run_once(cb, gcs)
         except Exception as e:
@@ -4746,12 +4789,22 @@ def main() -> None:
             try:
                 # Write a DOWN/ERROR-ish heartbeat while service is still alive.
                 gcs = GCS(BUCKET_NAME)
+                gcs.begin_cycle_budget(min(10.0, GCS_CYCLE_IO_BUDGET_SECONDS))
                 err_payload = {"ts": iso_utc(), "status": "ERROR", "state": "ERROR", "error": str(e), "bot": "Larry Perp v12 Unified"}
                 gcs.write_json(UNIFIED_HEARTBEAT_BLOB, err_payload)
                 gcs.write_json(LEGACY_HEARTBEAT_BLOB, err_payload)
             except Exception:
                 pass
-        time.sleep(LOOP_SECONDS)
+        cycle_elapsed = time.monotonic() - cycle_started
+        sleep_seconds = max(1.0, LOOP_SECONDS - cycle_elapsed)
+        if cycle_elapsed > LOOP_SECONDS:
+            log.warning(
+                "Cycle overran target interval: elapsed=%.2fs target=%ss; sleeping %.2fs",
+                cycle_elapsed,
+                LOOP_SECONDS,
+                sleep_seconds,
+            )
+        time.sleep(sleep_seconds)
 
 
 if __name__ == "__main__":

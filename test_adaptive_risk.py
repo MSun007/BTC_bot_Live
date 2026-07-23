@@ -156,6 +156,38 @@ class AdaptiveRiskTests(unittest.TestCase):
         allowed, _ = larry.adaptive_reentry_allows(state, "SHORT", None)
         self.assertTrue(allowed)
 
+    def test_gcs_read_retries_once_then_returns_success(self):
+        class RetryReadGCS(larry.GCS):
+            def __init__(self):
+                self.bucket_name = "test"
+                self.prefix = "gs://test"
+                self.use_python_storage = False
+                self.client = None
+                self.bucket = None
+                self._cycle_io_deadline = None
+                self.calls = 0
+
+            def _run(self, cmd, input_text=None, timeout_seconds=None):
+                self.calls += 1
+                if self.calls == 1:
+                    return larry.subprocess.CompletedProcess(cmd, 1, "", "transient")
+                return larry.subprocess.CompletedProcess(cmd, 0, "payload", "")
+
+        gcs = RetryReadGCS()
+        original_sleep = larry.time.sleep
+        try:
+            larry.time.sleep = lambda _seconds: None
+            self.assertEqual(gcs.read_text("critical.json", default="fallback"), "payload")
+            self.assertEqual(gcs.calls, 2)
+        finally:
+            larry.time.sleep = original_sleep
+
+    def test_gcs_cycle_budget_fails_fast_when_exhausted(self):
+        gcs = object.__new__(larry.GCS)
+        gcs._cycle_io_deadline = larry.time.monotonic() - 1
+        with self.assertRaises(TimeoutError):
+            gcs._run(["gcloud", "storage", "cat", "gs://test/object"])
+
 
 if __name__ == "__main__":
     unittest.main()

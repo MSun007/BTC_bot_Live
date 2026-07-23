@@ -1,6 +1,6 @@
 {
-  "CONFIG_VERSION": "v35_fresh_setup_guard",
-  "CONFIG_NOTE": "v35: preserves v34 authority and adaptive protection, but prevents same-side churn after an adaptive exit by requiring the old signal to clear, a genuinely fresh setup, recovery evidence, and probe-only first re-entry.",
+  "CONFIG_VERSION": "v36_bounded_gcs_io",
+  "CONFIG_NOTE": "v36: preserves the v35 fresh-setup guard and adds bounded retry for critical GCS reads plus a shared per-cycle I/O budget so storage outages cannot stall the trading loop for minutes.",
   "CONTRACT_SIZE_BTC": 0.01,
   "ATR_PERIOD": 14,
   "ATR_STOP_MULTIPLIER": 1.5,
