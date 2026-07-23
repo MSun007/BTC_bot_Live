@@ -40,7 +40,7 @@ Larry scores long and short conditions using RSI, stochastic RSI, Bollinger Band
 Typical lifecycle:
 
 ```text
-MONITORING → PHANTOM_ARMED → CLOSED-CANDLE CONFIRMATION → COMMITTED ENTRY
+MONITORING ? PHANTOM_ARMED ? CLOSED-CANDLE CONFIRMATION ? COMMITTED ENTRY
 ```
 
 Position size scales with conviction. The effective ladder is derived from `MAX_CONVICTION_CONTRACTS` and the configured probe, partial and strong percentages. `MAX_CONVICTION_CONTRACTS` is the sole absolute contract limit; the portfolio leverage guard may resize a target lower when account equity cannot safely support it.
@@ -77,8 +77,8 @@ Position-event rules:
 The non-negotiable protective stop remains:
 
 ```text
-LONG stop  = average entry − locked ATR × 1.5
-SHORT stop = average entry + locked ATR × 1.5
+LONG stop  = average entry ? locked ATR ? 1.5
+SHORT stop = average entry + locked ATR ? 1.5
 ```
 
 ATR is locked when the current position version is established. The firm ATR stop always takes priority over adaptive-defence logic.
@@ -105,7 +105,7 @@ Current live actions:
 | Score/state | Response |
 |---|---|
 | Below 65 | `HOLD` |
-| 65–84 for two consecutive cycles | Reduce one conviction rung |
+| 65?84 for two consecutive cycles | Reduce one conviction rung |
 | 85+ for two consecutive cycles | Exit the position |
 | Firm ATR stop crossed | Exit immediately |
 
@@ -189,6 +189,14 @@ The Larry Decision Pipeline displays:
 - Post-stop state and shadow scores
 
 The dashboard also provides Larry-only performance accounting, benchmark comparison, trade maps, realized P&L, drawdown, execution diagnostics, configuration visibility and emergency controls.
+
+### Crypto Research Lab
+
+The dashboard includes a separate `/research` workspace for exploring whether liquid crypto assets provide useful context for Bitcoin. It currently follows BTC, ETH, SOL, XRP, BNB, DOGE, USDT and USDC through CoinGecko and records, at most, one snapshot per hour in `gs://btc_trade_log/research/coingecko_hourly.json`.
+
+The lab shows current market moves, altcoin breadth, combined USDT/USDC market capitalization, contemporaneous return correlations and exploratory 1?6 hour lead/lag relationships. Statistics are deliberately labelled `collecting` until minimum sample thresholds are met. Correlation is not treated as causation, and no research result is imported by the trading engine or permitted to place an order.
+
+Set `COINGECKO_DEMO_API_KEY` in the Cloud Run environment to enable authenticated demo-API requests. The key is not stored in source control. Collection is demand-driven in this first version: a due snapshot is recorded when the Research Lab or `/api/research` is requested. A scheduled collector should be added before relying on uninterrupted hourly history.
 
 ## Manual positions and ownership
 

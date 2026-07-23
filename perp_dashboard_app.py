@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Coinbase Unified BTC Dashboard — v76 position-authority cleanup
+Coinbase Unified BTC Dashboard ? v76 position-authority cleanup
 - Coinbase-only: no Gemini files, no Gemini API calls
 - Preserves graphical Spot Signal Monitor UX
 - Adds professional capital, P&L, fee, funding, margin, and position transparency
@@ -8,13 +8,13 @@ Coinbase Unified BTC Dashboard — v76 position-authority cleanup
 - Live Coinbase avg entry is source of truth; legacy opening basis is reference-only
 - v69: emergency flatten records dashboard-initiated operator exits in Larry ledger with P&L attribution
 - v79: Larry equity curve + max drawdown + annualized Sharpe (reconstructed from the realized-trade ledger); trade-map range P&L now shown as a % return (comparable to BTC move %); CRITICAL fix of a v78 JS syntax error (a raw-string backslash-escaped apostrophe broke the entire dashboard script)
-- v78: Larry-focused declutter — single performance story (Larry-only equity headline), one Manual Trading Impact footnote (no dual monitoring), execution-quality source-of-truth bug fix, empty placeholders removed, global feed-freshness in header, windowed metrics relabeled
+- v78: Larry-focused declutter ? single performance story (Larry-only equity headline), one Manual Trading Impact footnote (no dual monitoring), execution-quality source-of-truth bug fix, empty placeholders removed, global feed-freshness in header, windowed metrics relabeled
 - v76: position-authority panel makes executable bot management explicit; Max Conviction is the sole size cap.
 - v75: command-center visual redesign (Bitcoin-terminal identity; CSS/login only, zero route or logic changes)
 - v73: every route now requires a PIN-gated login session (previously public/unauthenticated);
   the emergency-flatten request is HMAC-signed so the VM can verify it came from this dashboard.
 """
-import os, json, time, uuid, base64, traceback, csv, io, hmac, hashlib
+import os, json, time, uuid, base64, traceback, csv, io, hmac, hashlib, math
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List
 
@@ -107,18 +107,18 @@ def _record_pin_attempt(bucket_key: str) -> None:
     _pin_attempts.setdefault(bucket_key, []).append(time.time())
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # v73: authentication -- every route in this file used to be reachable by anyone
 # with the Cloud Run URL, including /api/halt, /api/resume, and the strategy
 # config writers. All routes now require a logged-in session; _pin_matches (used
 # by the operator PIN check below) is defined further down next to
 # _get_emergency_pin, which this references at request time.
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 _PUBLIC_PATHS = {"/login"}
 
 _LOGIN_PAGE_HTML = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Larry Command Center — Sign in</title>
+<title>Larry Command Center ? Sign in</title>
 <style>
   :root{--bg:#07080b;--card:#0e1218;--line:#212a37;--text:#e9eef5;--sub:#94a1b6;--brand:#f7931a}
   *{box-sizing:border-box}
@@ -146,9 +146,9 @@ _LOGIN_PAGE_HTML = """<!doctype html><html><head><meta charset="utf-8">
        border:1px solid rgba(240,86,92,.35);border-radius:8px;padding:8px 10px}
 </style></head><body>
 <form method="post" action="/login">
-  <div class="mark">₿</div>
+  <div class="mark">?</div>
   <h1>Larry Command Center</h1>
-  <div class="tag">BTC Perp Engine · operator access</div>
+  <div class="tag">BTC Perp Engine ? operator access</div>
   {% if error %}<div class="err">{{ error }}</div>{% endif %}
   <input type="password" name="pin" placeholder="Operator PIN" autofocus required>
   <button type="submit">Sign in</button>
@@ -217,6 +217,13 @@ GCS_SIGNAL_HISTORY = f"{BUCKET_PREFIX}/coinbase_signal_history.json"
 GCS_BOT_HALT = f"{BUCKET_PREFIX}/bot_halt.json"  # v29 kill switch
 GCS_EMERGENCY_FLATTEN_REQUEST = f"{BUCKET_PREFIX}/emergency_flatten_request.json"  # v71 PIN-validated dashboard request; VM executes
 GCS_SIGNAL_PNL_ROLLUP = f"{BUCKET_PREFIX}/signal_pnl_rollup.csv"  # v12 signal-class P&L rollup
+GCS_COINGECKO_RESEARCH = f"{BUCKET_PREFIX}/research/coingecko_hourly.json"
+COINGECKO_ASSETS = {
+    "bitcoin": "BTC", "ethereum": "ETH", "solana": "SOL", "ripple": "XRP",
+    "binancecoin": "BNB", "dogecoin": "DOGE", "tether": "USDT", "usd-coin": "USDC",
+}
+COINGECKO_SAMPLE_SECONDS = int(os.environ.get("COINGECKO_SAMPLE_SECONDS", "3600"))
+COINGECKO_MAX_SAMPLES = int(os.environ.get("COINGECKO_MAX_SAMPLES", str(24 * 120)))
 
 DEFAULT_CONFIG = {
     "BOT_NAME": "Coinbase Unified BTC Bot",
@@ -278,9 +285,9 @@ _cb: Optional[RESTClient] = None
 _fs: Optional[gcsfs.GCSFileSystem] = None
 _cache: Dict[str, Any] = {}
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # Basic helpers
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def now_et() -> str:
     return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S ET")
 
@@ -346,6 +353,144 @@ def write_json(path: str, payload: Dict[str, Any]):
         json.dump(payload, f, indent=2, default=str)
 
 
+def _research_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _research_corr(xs: List[float], ys: List[float]) -> Optional[float]:
+    pairs = [(float(x), float(y)) for x, y in zip(xs, ys) if x is not None and y is not None]
+    if len(pairs) < 8:
+        return None
+    ax, ay = zip(*pairs)
+    mx, my = sum(ax) / len(ax), sum(ay) / len(ay)
+    numerator = sum((x - mx) * (y - my) for x, y in pairs)
+    denominator = math.sqrt(sum((x - mx) ** 2 for x in ax) * sum((y - my) ** 2 for y in ay))
+    return (numerator / denominator) if denominator else None
+
+
+def _research_returns(history: List[Dict[str, Any]], coin_id: str) -> List[Optional[float]]:
+    values = [_research_float((row.get("assets") or {}).get(coin_id, {}).get("price")) for row in history]
+    output: List[Optional[float]] = []
+    for previous, current in zip(values, values[1:]):
+        output.append(math.log(current / previous) if previous and current and previous > 0 and current > 0 else None)
+    return output
+
+
+def fetch_coingecko_research_sample() -> Dict[str, Any]:
+    """Fetch one market snapshot. This research path cannot place or influence trades."""
+    api_key = str(os.environ.get("COINGECKO_DEMO_API_KEY") or "").strip()
+    headers = {"accept": "application/json"}
+    if api_key:
+        headers["x-cg-demo-api-key"] = api_key
+    response = requests.get(
+        "https://api.coingecko.com/api/v3/coins/markets",
+        params={
+            "vs_currency": "usd",
+            "ids": ",".join(COINGECKO_ASSETS),
+            "order": "market_cap_desc",
+            "sparkline": "false",
+            "price_change_percentage": "1h,24h,7d",
+        },
+        headers=headers,
+        timeout=15,
+    )
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list):
+        raise ValueError("CoinGecko returned an unexpected response")
+    assets: Dict[str, Any] = {}
+    for row in rows:
+        coin_id = str(row.get("id") or "")
+        if coin_id not in COINGECKO_ASSETS:
+            continue
+        assets[coin_id] = {
+            "symbol": COINGECKO_ASSETS[coin_id],
+            "price": _research_float(row.get("current_price")),
+            "market_cap": _research_float(row.get("market_cap")),
+            "volume_24h": _research_float(row.get("total_volume")),
+            "change_1h_pct": _research_float(row.get("price_change_percentage_1h_in_currency")),
+            "change_24h_pct": _research_float(row.get("price_change_percentage_24h_in_currency")),
+            "change_7d_pct": _research_float(row.get("price_change_percentage_7d_in_currency")),
+            "market_cap_change_24h_pct": _research_float(row.get("market_cap_change_percentage_24h")),
+        }
+    if "bitcoin" not in assets:
+        raise ValueError("CoinGecko snapshot did not include Bitcoin")
+    return {"timestamp": datetime.now(timezone.utc).isoformat(), "source": "CoinGecko /coins/markets", "assets": assets}
+
+
+def load_coingecko_research(refresh_if_due: bool = True) -> Dict[str, Any]:
+    payload = read_json(GCS_COINGECKO_RESEARCH, {}) or {}
+    history = payload.get("samples") if isinstance(payload.get("samples"), list) else []
+    history = [row for row in history if isinstance(row, dict) and isinstance(row.get("assets"), dict)]
+    fetch_error = None
+    last_epoch = 0.0
+    if history:
+        try:
+            last_epoch = datetime.fromisoformat(str(history[-1].get("timestamp")).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            last_epoch = 0.0
+    due = not history or (time.time() - last_epoch) >= COINGECKO_SAMPLE_SECONDS
+    if refresh_if_due and due:
+        try:
+            history.append(fetch_coingecko_research_sample())
+            history = history[-COINGECKO_MAX_SAMPLES:]
+            payload = {
+                "schema": "coingecko_research_v1",
+                "research_only": True,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "sample_interval_seconds": COINGECKO_SAMPLE_SECONDS,
+                "universe": COINGECKO_ASSETS,
+                "samples": history,
+            }
+            write_json(GCS_COINGECKO_RESEARCH, payload)
+        except Exception as exc:
+            fetch_error = f"{type(exc).__name__}: {exc}"
+            app.logger.warning("CoinGecko research refresh failed: %s", fetch_error)
+
+    latest = history[-1] if history else {"assets": {}}
+    btc_returns = _research_returns(history, "bitcoin")
+    correlations = []
+    for coin_id, symbol in COINGECKO_ASSETS.items():
+        if coin_id == "bitcoin" or symbol in ("USDT", "USDC"):
+            continue
+        alt_returns = _research_returns(history, coin_id)
+        windows = {}
+        for label, size in (("24h", 24), ("7d", 168), ("30d", 720)):
+            windows[label] = _research_corr(alt_returns[-size:], btc_returns[-size:])
+        best = {"lag_hours": None, "correlation": None}
+        for lag in range(1, 7):
+            if len(alt_returns) <= lag:
+                continue
+            corr = _research_corr(alt_returns[:-lag], btc_returns[lag:])
+            if corr is not None and (best["correlation"] is None or abs(corr) > abs(best["correlation"])):
+                best = {"lag_hours": lag, "correlation": corr}
+        correlations.append({
+            "id": coin_id, "symbol": symbol, "correlation": windows,
+            "best_alt_lead": best,
+            "sample_count": min(len(alt_returns), len(btc_returns)),
+        })
+
+    latest_assets = latest.get("assets") or {}
+    risk_assets = [latest_assets.get(cid, {}) for cid in COINGECKO_ASSETS if cid not in ("bitcoin", "tether", "usd-coin")]
+    breadth_values = [_research_float(asset.get("change_24h_pct")) for asset in risk_assets]
+    breadth_values = [value for value in breadth_values if value is not None]
+    breadth = (sum(1 for value in breadth_values if value > 0) / len(breadth_values) * 100.0) if breadth_values else None
+    stablecoin_cap = sum(_research_float((latest_assets.get(cid) or {}).get("market_cap")) or 0.0 for cid in ("tether", "usd-coin"))
+    return {
+        "ok": bool(history), "research_only": True, "trading_integration": False,
+        "path": GCS_COINGECKO_RESEARCH, "sample_count": len(history), "latest": latest,
+        "correlations": correlations, "breadth_24h_pct": breadth,
+        "stablecoin_market_cap_usd": stablecoin_cap or None,
+        "fetch_error": fetch_error, "refresh_due": due,
+        "minimum_guidance": {"correlation": 48, "lead_lag": 168, "promotion": 720},
+        "warning": "Exploratory statistics only. Correlation is not causation; no result can control Larry.",
+    }
+
+
 def read_first_json(paths: List[str], default=None) -> Dict[str, Any]:
     for p in paths:
         if p and gcs_exists(p):
@@ -397,7 +542,7 @@ def liquidity_from_order_payload(raw_order: Any) -> str:
         return "TAKER"
     if "limit_limit_gtc" in low or "post_only" in low:
         return "MAKER?"
-    return "—"
+    return "?"
 
 
 
@@ -604,7 +749,7 @@ def larry_trade_ledger_summary(engine_state: Dict[str, Any], tracking_start: Opt
             "worst_slippage_bps": min(slippages) if slippages else None,
             "maker_count": sum(1 for r in successful_rows if str(r.get("liquidity", "")).upper().startswith("MAKER")),
             "taker_count": sum(1 for r in successful_rows if str(r.get("liquidity", "")).upper().startswith("TAKER")),
-            "unknown_count": sum(1 for r in successful_rows if str(r.get("liquidity", "")) in ("", "—")),
+            "unknown_count": sum(1 for r in successful_rows if str(r.get("liquidity", "")) in ("", "?")),
             "fees_usd": fees,
             "note": "Maker/Taker is inferred from ledger order payload when fill-level liquidity is unavailable. Current market IOC orders are treated as taker.",
         },
@@ -664,9 +809,9 @@ def trade_map_price_history(product_id: str) -> Dict[str, Any]:
         "note": "1D/1W use hourly candles; 1M/YTD/12M use daily candles when available.",
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # Coinbase auth/client
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def secret(name: str) -> str:
     sm = secretmanager.SecretManagerServiceClient()
     ref = f"projects/{PROJECT_ID}/secrets/{name}/versions/latest"
@@ -768,11 +913,11 @@ def send_dashboard_telegram_message(text: str) -> bool:
         return False
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # v77: ad-hoc performance SNAPSHOT email (operator-triggered, investor-shareable)
 # Reuses the same data helpers as /api/data; read-only; behind PIN-gated session.
 # Email sending mirrors the bot's SMTP pattern (EMAIL_PASSWORD in Secret Manager).
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def send_dashboard_email(subject: str, html_body: str, to_addr: Optional[str] = None) -> (bool, str):
     cfg = load_config()
     email_from = str(cfg.get("EMAIL_FROM") or "lockinlarry2@gmail.com")
@@ -814,7 +959,7 @@ def send_dashboard_email(subject: str, html_body: str, to_addr: Optional[str] = 
 def _snapshot_status(halt_state, risk_gate, engine_state, macro, open_contracts):
     """Return (label, hex_color, detail) describing whether Larry is primed to trade."""
     if bool((halt_state or {}).get("halt")):
-        return "HALTED", "#f0565c", "Kill switch is active — no orders will be placed."
+        return "HALTED", "#f0565c", "Kill switch is active ? no orders will be placed."
     mstat = (engine_state or {}).get("manual_position_status") or {}
     if mstat.get("is_manual_or_external") and not mstat.get("allow_bot_to_trade_position", True):
         return "MONITORING", "#4da3ff", "A manual position is under monitor-only supervision; the core engine is observing, not managing it."
@@ -883,7 +1028,7 @@ def build_snapshot() -> Dict[str, Any]:
 
     now = datetime.now(TZ)
     return {
-        "as_of": now.strftime("%A, %B %-d, %Y · %-I:%M %p ET"),
+        "as_of": now.strftime("%A, %B %-d, %Y ? %-I:%M %p ET"),
         "as_of_short": now.strftime("%b %-d, %Y"),
         "btc_price": btc_price,
         "status_label": label, "status_color": color, "status_detail": detail,
@@ -912,17 +1057,17 @@ def build_snapshot() -> Dict[str, Any]:
 def render_snapshot_email_html(s: Dict[str, Any]) -> str:
     def usd(n):
         if n is None:
-            return "—"
+            return "?"
         n = float(n)
         return ("-" if n < 0 else "") + "$" + f"{abs(n):,.2f}"
     def pct(n, dp=1):
-        return "—" if n is None else f"{float(n):,.{dp}f}%"
+        return "?" if n is None else f"{float(n):,.{dp}f}%"
     def signed_pct(n, dp=1):
         if n is None:
-            return "—"
+            return "?"
         return ("+" if float(n) >= 0 else "") + f"{float(n):,.{dp}f}%"
     def numf(n, dp=2):
-        return "—" if n is None else f"{float(n):,.{dp}f}"
+        return "?" if n is None else f"{float(n):,.{dp}f}"
     def col(n):
         if n is None:
             return "#e9eef5"
@@ -934,10 +1079,10 @@ def render_snapshot_email_html(s: Dict[str, Any]) -> str:
     tot = lp + sp + fp or 1.0
     lw, sw, fw = round(lp / tot * 100), round(sp / tot * 100), round(fp / tot * 100)
 
-    open_line = "Flat — no open position"
+    open_line = "Flat ? no open position"
     if s.get("open_side") and str(s.get("open_side")).upper() not in ("FLAT", ""):
-        open_line = (f"{s['open_side']} {numf(s['open_contracts'],0)} contracts &nbsp;·&nbsp; "
-                     f"entry {usd(s['open_avg_entry'])} &nbsp;·&nbsp; mark {usd(s['open_mark'])} &nbsp;·&nbsp; "
+        open_line = (f"{s['open_side']} {numf(s['open_contracts'],0)} contracts &nbsp;?&nbsp; "
+                     f"entry {usd(s['open_avg_entry'])} &nbsp;?&nbsp; mark {usd(s['open_mark'])} &nbsp;?&nbsp; "
                      f"<span style=\"color:{col(s['open_unrealized_usd'])}\">unrealized {usd(s['open_unrealized_usd'])}</span>")
 
     def kpi(label, value, vcolor="#e9eef5", sub=""):
@@ -965,14 +1110,14 @@ def render_snapshot_email_html(s: Dict[str, Any]) -> str:
       <span style="display:inline-block;background:{s['status_color']};color:#07080b;font-size:12px;font-weight:bold;letter-spacing:.06em;padding:6px 12px;border-radius:7px">{s['status_label']}</span>
       <span style="font-size:13px;color:#94a1b6;margin-left:10px">{s['status_detail']}</span>
     </div>
-    <div style="font-size:12px;color:#5f6a7c;margin-top:12px">BTC {usd(s['btc_price'])} &nbsp;·&nbsp; Macro regime: {s['macro_state']} &nbsp;·&nbsp; {s['product']}</div>
+    <div style="font-size:12px;color:#5f6a7c;margin-top:12px">BTC {usd(s['btc_price'])} &nbsp;?&nbsp; Macro regime: {s['macro_state']} &nbsp;?&nbsp; {s['product']}</div>
   </td></tr>
 
   <tr><td style="background:#0e1218;border-left:1px solid #212a37;border-right:1px solid #212a37;padding:10px 18px 4px">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
       <tr>{kpi("Net P&amp;L (since inception)", usd(s['net_pnl_usd']), col(s['net_pnl_usd']), "Ledger realized + open unrealized, net of fees")}
-          {kpi("Return on capital", signed_pct(s['return_pct']), col(s['return_pct']), f"Alpha vs BTC buy-and-hold: {signed_pct(s['alpha_pct']) if s['alpha_pct'] is not None else '—'}")}</tr>
-      <tr>{kpi("Win rate", pct(s['win_rate_pct'],0), "#e9eef5", f"Profit factor {numf(s['profit_factor'],2)} · expectancy {usd(s['expectancy_usd'])}/trade")}
+          {kpi("Return on capital", signed_pct(s['return_pct']), col(s['return_pct']), f"Alpha vs BTC buy-and-hold: {signed_pct(s['alpha_pct']) if s['alpha_pct'] is not None else '?'}")}</tr>
+      <tr>{kpi("Win rate", pct(s['win_rate_pct'],0), "#e9eef5", f"Profit factor {numf(s['profit_factor'],2)} ? expectancy {usd(s['expectancy_usd'])}/trade")}
           {kpi("Trades executed", numf(s['realized_trades'],0), "#e9eef5", f"Avg slippage {numf(s['avg_slippage_bps'],1)} bps")}</tr>
     </table>
   </td></tr>
@@ -998,7 +1143,7 @@ def render_snapshot_email_html(s: Dict[str, Any]) -> str:
 
   <tr><td style="background:#0e1218;border:1px solid #212a37;border-top:0;border-radius:0 0 16px 16px;padding:16px 26px 20px">
     <div style="font-size:11px;color:#5f6a7c;line-height:1.6">
-      Systematic Bitcoin perpetual-futures engine · rule-based, bidirectional, risk-management-first. Figures are drawn live from the exchange-reconciled ledger at the time shown. Trading digital-asset derivatives involves substantial risk of loss; past performance is not indicative of future results. Prepared for discussion purposes only — not an offer or solicitation.
+      Systematic Bitcoin perpetual-futures engine ? rule-based, bidirectional, risk-management-first. Figures are drawn live from the exchange-reconciled ledger at the time shown. Trading digital-asset derivatives involves substantial risk of loss; past performance is not indicative of future results. Prepared for discussion purposes only ? not an offer or solicitation.
     </div>
   </td></tr>
 
@@ -1017,11 +1162,11 @@ def api_snapshot():
             return jsonify({"ok": False, "error": "That doesn't look like a valid email address."}), 400
         snap = build_snapshot()
         html = render_snapshot_email_html(snap)
-        ok, info = send_dashboard_email(f"Larry BTC Perp — Performance Snapshot ({snap['as_of_short']})", html, to_addr)
+        ok, info = send_dashboard_email(f"Larry BTC Perp ? Performance Snapshot ({snap['as_of_short']})", html, to_addr)
         if not ok:
             return jsonify({"ok": False, "error": info}), 500
         try:
-            send_dashboard_telegram_message(f"📸 Snapshot emailed to {info} — status {snap['status_label']}, net P&L {snap['net_pnl_usd']:.2f}.")
+            send_dashboard_telegram_message(f"?? Snapshot emailed to {info} ? status {snap['status_label']}, net P&L {snap['net_pnl_usd']:.2f}.")
         except Exception:
             pass
         return jsonify({"ok": True, "sent_to": info, "status": snap["status_label"]})
@@ -1091,9 +1236,9 @@ def place_dashboard_market_order(product_id: str, side: str, contracts: float, r
     except Exception as e:
         return {"ok": False, "error": str(e), "client_order_id": client_order_id, "product_id": product_id, "side": side, "contracts": contracts}
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # Config / heartbeat / market data
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def load_config() -> Dict[str, Any]:
     cfg = dict(DEFAULT_CONFIG)
     live = read_first_json(GCS_CONFIG_CANDIDATES, {})
@@ -1297,9 +1442,9 @@ def candles_df(product_id: str, granularity: str, limit: int = 300) -> Optional[
     except Exception:
         return None
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # Account, fills, positions
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def spot_accounts(btc_price: float) -> Dict[str, Any]:
     """Return Coinbase Spot treasury balances.
 
@@ -1499,7 +1644,7 @@ def format_iso_et(ts: Optional[str]) -> str:
     """Human-friendly Eastern Time timestamp for dashboard/operator messages."""
     dt = parse_iso_utc(ts)
     if not dt:
-        return "—"
+        return "?"
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     local = dt.astimezone(TZ)
@@ -1509,7 +1654,7 @@ def format_iso_et(ts: Optional[str]) -> str:
 def format_operator_reason_et(reason: Any) -> str:
     """Replace raw ISO/UTC timestamps in status reasons with clean ET text."""
     if not reason:
-        return "—"
+        return "?"
     text = str(reason)
     import re
 
@@ -1853,9 +1998,9 @@ def pnl_summary(fut: Dict[str, Any], fills: Dict[str, Any], positions: List[Dict
         "exchange_reference_excluded_from_clean_pnl": True,
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # Signal monitor
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def signal_snapshot(df: Optional[pd.DataFrame], cfg: Dict[str, Any]) -> Dict[str, Any]:
     if df is None or df.empty or len(df) < 60:
         return {"error": "insufficient candles"}
@@ -1973,11 +2118,11 @@ def macro_snapshot(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
         regime = "MIXED"
         failed = []
         if not above_fast:
-            failed.append("Price ≤ Fast SMA")
+            failed.append("Price ? Fast SMA")
         if not above_slow:
-            failed.append("Price ≤ Slow SMA")
+            failed.append("Price ? Slow SMA")
         if not fast_above_slow:
-            failed.append("Fast SMA ≤ Slow SMA")
+            failed.append("Fast SMA ? Slow SMA")
         blocked_reason = ", ".join(failed) if failed else "Macro gate closed"
     def dist(a, b):
         return ((a / b) - 1.0) * 100.0 if b else None
@@ -2000,9 +2145,9 @@ def macro_snapshot(df: Optional[pd.DataFrame]) -> Dict[str, Any]:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # Strategy-state readers
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 def spot_strategy_state() -> Dict[str, Any]:
     state = read_json(GCS_SPOT_STATE, {})
     positions = state.get("positions", {}) if isinstance(state, dict) else {}
@@ -2090,10 +2235,10 @@ def perp_signal_snapshot(sig: Dict[str, Any], macro: Dict[str, Any], exchange_po
 
         # SHORT/reversal monitor is intentionally explicit. It is not allowed to pretend a SELL 2 equals SHORT 2.
         short_components = {
-            f"RSI ≥ {short_rsi_threshold:g}": bool(rsi is not None and rsi >= short_rsi_threshold),
+            f"RSI ? {short_rsi_threshold:g}": bool(rsi is not None and rsi >= short_rsi_threshold),
             "Upper Bollinger": bool(price is not None and bb_upper is not None and price >= bb_upper),
             "Volume spike": bool(vol_ratio >= vol_threshold),
-            f"Stoch ≥ {short_stoch_threshold:.2f}": bool(stoch is not None and stoch >= short_stoch_threshold),
+            f"Stoch ? {short_stoch_threshold:.2f}": bool(stoch is not None and stoch >= short_stoch_threshold),
         }
         short_score = sum(1 for v in short_components.values() if v)
         short_signal = bool(short_score >= 3)
@@ -2103,7 +2248,7 @@ def perp_signal_snapshot(sig: Dict[str, Any], macro: Dict[str, Any], exchange_po
         sell_ticket = contracts_per_trade if short_signal else 0
         after_sell = signed_now - sell_ticket
         if after_sell > 0:
-            net_effect = f"SELL {sell_ticket} would reduce LONG {abs(signed_now)} → LONG {after_sell}"
+            net_effect = f"SELL {sell_ticket} would reduce LONG {abs(signed_now)} ? LONG {after_sell}"
         elif after_sell == 0 and sell_ticket:
             net_effect = f"SELL {sell_ticket} would flatten the current position"
         elif after_sell < 0 and sell_ticket:
@@ -2195,7 +2340,7 @@ def iaf_engine_state(cfg: Dict[str, Any], perp_meta: Dict[str, Any], fut_bal: Di
     tsl_original_ok = (tsl_activation is not None and abs(tsl_activation - 0.08) < 1e-9 and tsl_trail is not None and abs(tsl_trail - 0.03) < 1e-9)
 
     return {
-        "framework": "IAF Layer 3 — Risk Management First / J-curve model",
+        "framework": "IAF Layer 3 ? Risk Management First / J-curve model",
         "exchange": cfg.get("PERP_PRODUCT_ID", "BIP-20DEC30-CDE"),
         "contract_size_btc": contract_size,
         "contracts_per_trade": contracts_per_trade,
@@ -2227,7 +2372,7 @@ def iaf_engine_state(cfg: Dict[str, Any], perp_meta: Dict[str, Any], fut_bal: Di
             {"rule": "Daily Umbrella", "current": f"{stop_hits}/3 stop hits", "status": "HALTED" if stop_hits >= 3 or halted_until else "ACTIVE"},
             {"rule": "Streak Pause", "current": f"{loss_streak}/3 losses", "status": "PAUSED" if loss_streak >= 3 or pause_until else "ACTIVE"},
             {"rule": "Phantom Delay", "current": phantom_status, "status": "PUBLISHED" if phantom_status != "Not published" else "NEEDS BOT STATE"},
-            {"rule": "Funding Gate", "current": f"{funding_rate if funding_rate is not None else '—'}", "status": "OPEN" if not funding_gate_long_blocked and not funding_gate_short_blocked else "BLOCKED"},
+            {"rule": "Funding Gate", "current": f"{funding_rate if funding_rate is not None else '?'}", "status": "OPEN" if not funding_gate_long_blocked and not funding_gate_short_blocked else "BLOCKED"},
             {"rule": "Bidirectional", "current": "Long + Short monitor", "status": "MONITORED"},
         ],
     }
@@ -2324,7 +2469,7 @@ def perp_position_risk_state(positions: List[Dict[str, Any]], cfg: Dict[str, Any
         progress_to_activation_pct = max(0.0, min(100.0, progress_to_activation_pct))
 
     if tsl_active:
-        status = "TSL active — trailing stop is now the active exit level."
+        status = "TSL active ? trailing stop is now the active exit level."
     elif activation_gap is not None and activation_gap <= 0:
         status = "Activation threshold reached; waiting for bot state to publish TSL active."
     else:
@@ -2357,7 +2502,7 @@ def perp_position_risk_state(positions: List[Dict[str, Any]], cfg: Dict[str, Any
         "progress_to_activation_pct": progress_to_activation_pct,
         "distance_to_stop": distance_to_stop,
         "distance_to_stop_pct": distance_to_stop_pct,
-        "status": ("Manual position monitor-only — Larry will not execute ATR/TSL exits on this exposure. " + status) if effective_management_mode == "monitor_only" else status,
+        "status": ("Manual position monitor-only ? Larry will not execute ATR/TSL exits on this exposure. " + status) if effective_management_mode == "monitor_only" else status,
         "management_mode": effective_management_mode,
         "manual_monitor_only": effective_management_mode == "monitor_only",
         "source": "Coinbase live position + v34 engine ownership and position controls",
@@ -2494,19 +2639,19 @@ def live_risk_gate_state(engine_state: Dict[str, Any], cfg: Dict[str, Any], macr
     if not entries_allowed:
         label = "RISK BLOCKED"
         color = "blocked"
-        headline = "🔴 Risk Gate Blocked"
+        headline = "?? Risk Gate Blocked"
     elif macro_open is False:
         # Macro gate can block Spot/Bridge entries, but it is NOT a global trading halt.
         # Keep the top trading gate open when risk allows entries so PHANTOM/MIXED macro
         # states do not render as a scary global BLOCKED status.
         label = "OPEN"
         color = "enabled"
-        headline = "🟢 Trading Gate Open"
+        headline = "?? Trading Gate Open"
         reason = "Risk gate open. Macro filter is not fully bullish, so Spot/Bridge entries may be restricted."
     else:
         label = "OPEN"
         color = "enabled"
-        headline = "🟢 Trading Gate Open"
+        headline = "?? Trading Gate Open"
     return {
         "entries_allowed": entries_allowed,
         "entries_halted": entries_halted,
@@ -2656,9 +2801,9 @@ def build_risk_intelligence(cfg: Dict[str, Any], engine_state: Dict[str, Any], h
         "health": health,
     }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # API
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 @app.route("/api/data")
 def api_data():
     now = time.time()
@@ -2773,7 +2918,7 @@ def api_data():
         # an exception. Surface that as an operator warning instead of only showing a
         # cryptic red ERROR pill in the command center.
         if str(heartbeat.get("state") or "").upper() == "ERROR":
-            warnings.append("Bot loop heartbeat state is ERROR. Process may be alive, but the last bot cycle hit an exception — check journalctl for the latest traceback.")
+            warnings.append("Bot loop heartbeat state is ERROR. Process may be alive, but the last bot cycle hit an exception ? check journalctl for the latest traceback.")
         if perp_meta.get("session_open") is False:
             warnings.append("Futures exchange session is closed; exchange mark/P&L fields may use settlement/stale marks.")
         if isinstance(risk_gate, dict) and risk_gate.get("entries_allowed") is False:
@@ -3319,7 +3464,7 @@ def api_emergency_flatten():
         write_json(GCS_EMERGENCY_FLATTEN_REQUEST, request_payload)
         app.logger.warning("EMERGENCY_FLATTEN_REQUEST_WRITTEN request_id=%s remote=%s pos_hint=%s", request_id, remote, pos_hint)
         send_dashboard_telegram_message(
-            f"🛑 EMERGENCY FLATTEN REQUESTED\nPIN accepted. Larry VM will verify signature and execute using trading key.\nPosition hint: {pos_hint.get('side')} {pos_hint.get('contracts')}\nRequest: {request_id}\nTime: {now_z}"
+            f"?? EMERGENCY FLATTEN REQUESTED\nPIN accepted. Larry VM will verify signature and execute using trading key.\nPosition hint: {pos_hint.get('side')} {pos_hint.get('contracts')}\nRequest: {request_id}\nTime: {now_z}"
         )
         _cache.clear()
         return jsonify({
@@ -3493,9 +3638,9 @@ def api_raw():
         "config": load_config(),
     })
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 # UI
-# ─────────────────────────────────────────────────────────────────────────────
+# ?????????????????????????????????????????????????????????????????????????????
 HTML = r'''
 <!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Larry BTC Perp Command Center</title>
@@ -3721,7 +3866,7 @@ h3{margin:0 0 8px;font-size:.78rem;color:var(--sub);font-weight:700}
 .collapsible-controls details{padding:18px 20px}
 .collapsible-controls summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap}
 .collapsible-controls summary::-webkit-details-marker{display:none}
-.collapsible-controls summary:before{content:'▸';font-size:18px;color:var(--muted);transition:transform .18s ease}
+.collapsible-controls summary:before{content:'?';font-size:18px;color:var(--muted);transition:transform .18s ease}
 .collapsible-controls details[open] summary:before{transform:rotate(90deg)}
 .collapsible-controls .summary-title{font-size:18px;font-weight:800;margin-right:auto}
 .collapsible-controls .summary-hint{font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:5px 9px;background:rgba(255,255,255,.04)}
@@ -3774,7 +3919,7 @@ h3{margin:0 0 8px;font-size:.78rem;color:var(--sub);font-weight:700}
 
 /* v63 Trade Map & Performance overlay */
 .trade-map-controls{display:flex;gap:7px;flex-wrap:wrap;margin:8px 0 12px}.tm-btn{border:1px solid rgba(255,255,255,.12);background:rgba(15,23,42,.72);color:var(--sub);border-radius:999px;padding:7px 11px;font-size:.72rem;font-weight:950;cursor:pointer}.tm-btn.on{background:rgba(56,189,248,.16);border-color:rgba(56,189,248,.55);color:#bae6fd}.trade-map-wrap{display:grid;grid-template-columns:1fr;gap:10px}.trade-map-canvas-box{position:relative;background:#0b0e14;border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:10px;overflow:hidden}.trade-map-canvas{display:block;width:100%;height:330px}.trade-map-pnl{height:170px}.trade-map-legend{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}.tm-legend-pill{border:1px solid rgba(255,255,255,.10);background:rgba(255,255,255,.04);border-radius:999px;padding:5px 8px;font-size:.68rem;font-weight:850;color:var(--sub)}.tm-tip{position:absolute;display:none;z-index:20;max-width:260px;background:rgba(2,6,23,.96);border:1px solid rgba(255,255,255,.15);border-radius:12px;padding:9px;color:var(--text);font-size:.72rem;line-height:1.35;box-shadow:0 12px 40px rgba(0,0,0,.35);pointer-events:none}.tm-note{font-size:.72rem;color:var(--muted);line-height:1.35;margin-top:8px}.tm-empty{padding:20px;color:var(--muted);text-align:center}.tm-marker-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.tm-stat{background:#0b0e14;border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:9px}.tm-stat .label{font-size:.66rem;color:var(--sub);font-weight:900}.tm-stat .val{font-size:.95rem;font-weight:950;margin-top:3px}@media(max-width:760px){.trade-map-canvas{height:280px}.trade-map-pnl{height:135px}.tm-marker-summary{grid-template-columns:1fr 1fr}.trade-map-controls{display:grid;grid-template-columns:repeat(3,1fr)}.tm-btn{width:100%;padding:9px 6px}}
-.advanced-diagnostics{grid-column:span 12;border:1px solid rgba(255,255,255,.09);border-radius:18px;background:rgba(15,23,42,.42);overflow:hidden}.advanced-diagnostics>summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:15px 18px;cursor:pointer;font-weight:900;list-style:none}.advanced-diagnostics>summary::-webkit-details-marker{display:none}.advanced-diagnostics>summary::before{content:"▸";color:#38bdf8;transition:transform .18s ease}.advanced-diagnostics[open]>summary::before{transform:rotate(90deg)}.advanced-diagnostics .advanced-grid{padding:0 10px 10px}.refresh-stamp{margin-top:2px;font-size:.65rem;color:var(--muted);font-variant-numeric:tabular-nums}
+.advanced-diagnostics{grid-column:span 12;border:1px solid rgba(255,255,255,.09);border-radius:18px;background:rgba(15,23,42,.42);overflow:hidden}.advanced-diagnostics>summary{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:15px 18px;cursor:pointer;font-weight:900;list-style:none}.advanced-diagnostics>summary::-webkit-details-marker{display:none}.advanced-diagnostics>summary::before{content:"?";color:#38bdf8;transition:transform .18s ease}.advanced-diagnostics[open]>summary::before{transform:rotate(90deg)}.advanced-diagnostics .advanced-grid{padding:0 10px 10px}.refresh-stamp{margin-top:2px;font-size:.65rem;color:var(--muted);font-variant-numeric:tabular-nums}
 
 
 /* v75 command-center polish layer */
@@ -3790,66 +3935,66 @@ button,input,select{font-family:inherit}
 @keyframes livedot{0%,100%{opacity:1}50%{opacity:.3}}
 .v12-val,.intel-val,.score-reconcile-card .value,.trigger-price,.tm-stat .val,.nearest-card .val,.trigger-tile .val,.trigger-lane-card .val{font-variant-numeric:tabular-nums}
 .v12-title,.intel-title,.tm-stat .label,.trigger-tile .label,.trigger-lane-card .label,.nearest-card .label,.score-reconcile-card .title{text-transform:uppercase;letter-spacing:.07em;font-size:.62rem;font-weight:700}
-.mindset-shell{border:1px solid rgba(56,189,248,.28);background:linear-gradient(135deg,rgba(8,47,73,.34),rgba(11,14,20,.88) 48%,rgba(30,41,59,.68));border-radius:18px;padding:14px;overflow:hidden}.mindset-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.mindset-kicker{font-size:.64rem;color:var(--blue);font-weight:900;text-transform:uppercase;letter-spacing:.09em}.mindset-decision{font-size:1.18rem;font-weight:1000;margin-top:3px;line-height:1.15}.mindset-reason{font-size:.72rem;color:var(--sub);margin-top:5px;line-height:1.35;max-width:760px}.mindset-badge{flex:0 0 auto;padding:7px 10px;border-radius:999px;border:1px solid rgba(148,163,184,.28);background:rgba(148,163,184,.10);font-size:.68rem;font-weight:950;text-transform:uppercase;letter-spacing:.06em}.mindset-badge.good{color:#bbf7d0;border-color:rgba(34,197,94,.42);background:rgba(34,197,94,.12)}.mindset-badge.warn{color:#fed7aa;border-color:rgba(245,158,11,.42);background:rgba(245,158,11,.12)}.mindset-badge.bad{color:#fecaca;border-color:rgba(239,68,68,.42);background:rgba(239,68,68,.12)}.mindset-flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.mindset-step{position:relative;min-width:0;border:1px solid rgba(255,255,255,.08);background:rgba(2,6,23,.48);border-radius:14px;padding:10px}.mindset-step:not(:last-child):after{content:'›';position:absolute;right:-8px;top:50%;transform:translate(50%,-50%);z-index:2;color:rgba(56,189,248,.8);font-size:1.15rem;font-weight:1000}.mindset-step.active{border-color:rgba(56,189,248,.62);background:rgba(56,189,248,.12);box-shadow:0 0 18px rgba(56,189,248,.10)}.mindset-step.done{border-color:rgba(34,197,94,.32);background:rgba(34,197,94,.07)}.mindset-label{font-size:.59rem;text-transform:uppercase;letter-spacing:.075em;color:var(--muted);font-weight:850}.mindset-value{font-size:.91rem;font-weight:950;margin-top:4px;overflow-wrap:anywhere}.mindset-note{font-size:.65rem;color:var(--sub);margin-top:4px;line-height:1.28;overflow-wrap:anywhere}.mindset-profit{margin-top:10px;border-top:1px solid rgba(255,255,255,.07);padding-top:10px}.mindset-profit-head{display:flex;justify-content:space-between;gap:10px;align-items:end}.mindset-profit-title{font-size:.65rem;color:var(--sub);font-weight:850;text-transform:uppercase;letter-spacing:.06em}.mindset-profit-value{font-size:.78rem;font-weight:950}.mindset-track{height:10px;border-radius:999px;background:rgba(148,163,184,.18);margin-top:7px;position:relative;overflow:visible}.mindset-fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--green),var(--blue));transition:width .35s ease}.mindset-marker{position:absolute;top:-4px;width:2px;height:18px;background:var(--orange);box-shadow:0 0 8px rgba(245,158,11,.6)}.mindset-profit-foot{display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:.61rem;color:var(--muted)}
-@media(max-width:760px){.mindset-shell{padding:11px}.mindset-head{display:block}.mindset-badge{display:inline-flex;margin-top:9px}.mindset-decision{font-size:1.04rem}.mindset-flow{grid-template-columns:1fr;gap:7px}.mindset-step{display:grid;grid-template-columns:82px minmax(0,1fr);column-gap:8px;align-items:start;padding:9px}.mindset-step:not(:last-child):after{content:'↓';right:auto;left:39px;top:auto;bottom:-12px;transform:none;font-size:.85rem}.mindset-value{margin-top:0;font-size:.85rem}.mindset-note{grid-column:2;margin-top:2px}.mindset-profit-head{align-items:flex-start}.mindset-profit-foot{font-size:.58rem}}
+.mindset-shell{border:1px solid rgba(56,189,248,.28);background:linear-gradient(135deg,rgba(8,47,73,.34),rgba(11,14,20,.88) 48%,rgba(30,41,59,.68));border-radius:18px;padding:14px;overflow:hidden}.mindset-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}.mindset-kicker{font-size:.64rem;color:var(--blue);font-weight:900;text-transform:uppercase;letter-spacing:.09em}.mindset-decision{font-size:1.18rem;font-weight:1000;margin-top:3px;line-height:1.15}.mindset-reason{font-size:.72rem;color:var(--sub);margin-top:5px;line-height:1.35;max-width:760px}.mindset-badge{flex:0 0 auto;padding:7px 10px;border-radius:999px;border:1px solid rgba(148,163,184,.28);background:rgba(148,163,184,.10);font-size:.68rem;font-weight:950;text-transform:uppercase;letter-spacing:.06em}.mindset-badge.good{color:#bbf7d0;border-color:rgba(34,197,94,.42);background:rgba(34,197,94,.12)}.mindset-badge.warn{color:#fed7aa;border-color:rgba(245,158,11,.42);background:rgba(245,158,11,.12)}.mindset-badge.bad{color:#fecaca;border-color:rgba(239,68,68,.42);background:rgba(239,68,68,.12)}.mindset-flow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}.mindset-step{position:relative;min-width:0;border:1px solid rgba(255,255,255,.08);background:rgba(2,6,23,.48);border-radius:14px;padding:10px}.mindset-step:not(:last-child):after{content:'?';position:absolute;right:-8px;top:50%;transform:translate(50%,-50%);z-index:2;color:rgba(56,189,248,.8);font-size:1.15rem;font-weight:1000}.mindset-step.active{border-color:rgba(56,189,248,.62);background:rgba(56,189,248,.12);box-shadow:0 0 18px rgba(56,189,248,.10)}.mindset-step.done{border-color:rgba(34,197,94,.32);background:rgba(34,197,94,.07)}.mindset-label{font-size:.59rem;text-transform:uppercase;letter-spacing:.075em;color:var(--muted);font-weight:850}.mindset-value{font-size:.91rem;font-weight:950;margin-top:4px;overflow-wrap:anywhere}.mindset-note{font-size:.65rem;color:var(--sub);margin-top:4px;line-height:1.28;overflow-wrap:anywhere}.mindset-profit{margin-top:10px;border-top:1px solid rgba(255,255,255,.07);padding-top:10px}.mindset-profit-head{display:flex;justify-content:space-between;gap:10px;align-items:end}.mindset-profit-title{font-size:.65rem;color:var(--sub);font-weight:850;text-transform:uppercase;letter-spacing:.06em}.mindset-profit-value{font-size:.78rem;font-weight:950}.mindset-track{height:10px;border-radius:999px;background:rgba(148,163,184,.18);margin-top:7px;position:relative;overflow:visible}.mindset-fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,var(--green),var(--blue));transition:width .35s ease}.mindset-marker{position:absolute;top:-4px;width:2px;height:18px;background:var(--orange);box-shadow:0 0 8px rgba(245,158,11,.6)}.mindset-profit-foot{display:flex;justify-content:space-between;gap:8px;margin-top:6px;font-size:.61rem;color:var(--muted)}
+@media(max-width:760px){.mindset-shell{padding:11px}.mindset-head{display:block}.mindset-badge{display:inline-flex;margin-top:9px}.mindset-decision{font-size:1.04rem}.mindset-flow{grid-template-columns:1fr;gap:7px}.mindset-step{display:grid;grid-template-columns:82px minmax(0,1fr);column-gap:8px;align-items:start;padding:9px}.mindset-step:not(:last-child):after{content:'?';right:auto;left:39px;top:auto;bottom:-12px;transform:none;font-size:.85rem}.mindset-value{margin-top:0;font-size:.85rem}.mindset-note{grid-column:2;margin-top:2px}.mindset-profit-head{align-items:flex-start}.mindset-profit-foot{font-size:.58rem}}
 .defense-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}.defense-cell{border:1px solid rgba(148,163,184,.18);border-radius:12px;padding:9px;background:rgba(2,6,23,.42)}.defense-cell .k{font-size:.58rem;color:var(--muted);font-weight:850;text-transform:uppercase;letter-spacing:.065em}.defense-cell .v{font-size:.88rem;font-weight:950;margin-top:4px}.defense-cell .n{font-size:.61rem;color:var(--sub);line-height:1.3;margin-top:3px}.defense-score{height:6px;background:rgba(148,163,184,.18);border-radius:999px;margin-top:6px;overflow:hidden}.defense-score span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--green),var(--orange),var(--red));transition:width .3s ease}@media(max-width:760px){.defense-grid{grid-template-columns:1fr 1fr}.defense-cell{padding:8px}}@media(max-width:430px){.defense-grid{grid-template-columns:1fr}}
 .management-alert{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:12px;padding:12px 14px;border-radius:14px;border:1px solid rgba(148,163,184,.22);background:rgba(15,23,42,.72)}.management-alert .ma-title{font-size:.82rem;font-weight:1000;letter-spacing:.02em}.management-alert .ma-note{font-size:.72rem;color:var(--sub);margin-top:3px;line-height:1.35}.management-alert .ma-badge{flex:0 0 auto;border-radius:999px;padding:7px 10px;font-size:.66rem;font-weight:1000;letter-spacing:.06em}.management-alert.managed{border-color:rgba(34,197,94,.45);background:rgba(34,197,94,.09)}.management-alert.managed .ma-badge{color:#bbf7d0;background:rgba(34,197,94,.15)}.management-alert.unmanaged{border-color:rgba(239,68,68,.62);background:rgba(127,29,29,.22);box-shadow:0 0 24px rgba(239,68,68,.08)}.management-alert.unmanaged .ma-title{color:#fecaca}.management-alert.unmanaged .ma-badge{color:#fff;background:#b91c1c}.management-alert.flat .ma-badge{color:#cbd5e1;background:rgba(148,163,184,.14)}@media(max-width:760px){.management-alert{align-items:flex-start}.management-alert .ma-note{font-size:.76rem}.management-alert .ma-badge{white-space:nowrap}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 </style></head><body><div class="app">
-<header class="hero"><div class="hero-row"><div><div class="brand">₿ Larry BTC Perp Command Center</div><div class="sub" id="productLine">Spot + Perp · Coinbase-only</div></div><div><div class="price" id="btcPrice">—</div><div class="sub" id="serverTime">—</div><div class="refresh-stamp" id="dashboardRefresh">Dashboard refreshed —</div></div></div><div class="pill-row"><span class="pill blue" id="botHealth">BOT —</span><span class="pill blue" id="botState">STATE —</span><span class="pill blue" id="macroPill">MACRO —</span><span class="pill purple" id="sessionPill">SESSION —</span><button class="pill" style="cursor:pointer;border:1px solid rgba(247,147,26,.5);background:rgba(247,147,26,.12);color:#ffbf69;font-weight:700" onclick="sendSnapshot(event)">📸 Snapshot</button><button class="pill" style="cursor:pointer;border:none" onclick="signOut()">Sign out</button></div></header>
+<header class="hero"><div class="hero-row"><div><div class="brand">? Larry BTC Perp Command Center</div><div class="sub" id="productLine">Spot + Perp ? Coinbase-only</div></div><div><div class="price" id="btcPrice">?</div><div class="sub" id="serverTime">?</div><div class="refresh-stamp" id="dashboardRefresh">Dashboard refreshed ?</div></div></div><div class="pill-row"><span class="pill blue" id="botHealth">BOT ?</span><span class="pill blue" id="botState">STATE ?</span><span class="pill blue" id="macroPill">MACRO ?</span><span class="pill purple" id="sessionPill">SESSION ?</span><a class="pill" style="text-decoration:none;border:1px solid rgba(95,210,255,.45);background:rgba(95,210,255,.1);color:#9ae8ff;font-weight:700" href="/research">?? Research Lab</a><button class="pill" style="cursor:pointer;border:1px solid rgba(247,147,26,.5);background:rgba(247,147,26,.12);color:#ffbf69;font-weight:700" onclick="sendSnapshot(event)">?? Snapshot</button><button class="pill" style="cursor:pointer;border:none" onclick="signOut()">Sign out</button></div></header>
 <div class="errbox" id="errorBox"></div><div class="warnbox" id="warnBox"></div>
 <main class="grid">
-<section class="card span12 authority-card"><h2>Position Authority <span class="method-badge">Coinbase truth · execution permission</span></h2><div class="management-alert flat" id="managementAlert"><div><div class="ma-title" id="managementTitle">Checking position authority…</div><div class="ma-note" id="managementNote">Larry is reconciling the live Coinbase position with persisted bot ownership.</div></div><div class="ma-badge" id="managementBadge">CHECKING</div></div></section>
-<section class="card span12"><h2>Larry Decision Pipeline <span class="method-badge">live mindset · triggers · conviction · profit protection</span></h2><div class="mindset-shell"><div class="mindset-head"><div><div class="mindset-kicker">Current decision</div><div class="mindset-decision" id="mindsetDecision">Loading Larry's current state...</div><div class="mindset-reason" id="mindsetReason">Reading the current engine cycle, live position, and exit plan.</div></div><div class="mindset-badge" id="mindsetBadge">WAITING</div></div><div class="mindset-flow"><div class="mindset-step" id="mindsetRegimeStep"><div class="mindset-label">Market regime</div><div class="mindset-value" id="mindsetRegime">—</div><div class="mindset-note" id="mindsetRegimeNote">Macro and funding gates</div></div><div class="mindset-step" id="mindsetTriggerStep"><div class="mindset-label">Trigger score</div><div class="mindset-value" id="mindsetTrigger">—</div><div class="mindset-note" id="mindsetTriggerNote">Arm and commit progress</div></div><div class="mindset-step" id="mindsetConvictionStep"><div class="mindset-label">Conviction</div><div class="mindset-value" id="mindsetConviction">—</div><div class="mindset-note" id="mindsetConvictionNote">Target size from confidence</div></div><div class="mindset-step" id="mindsetPositionStep"><div class="mindset-label">Position plan</div><div class="mindset-value" id="mindsetPosition">—</div><div class="mindset-note" id="mindsetPositionNote">Live exchange position</div></div><div class="mindset-step" id="mindsetExitStep"><div class="mindset-label">Exit plan</div><div class="mindset-value" id="mindsetExit">—</div><div class="mindset-note" id="mindsetExitNote">TP, trailing stop, and ATR protection</div></div></div><div class="mindset-profit"><div class="mindset-profit-head"><div class="mindset-profit-title">Profit-protection progress</div><div class="mindset-profit-value" id="mindsetProfitValue">Flat / waiting</div></div><div class="mindset-track"><div class="mindset-fill" id="mindsetProfitFill"></div><div class="mindset-marker" id="mindsetTpMarker" style="left:50%"></div></div><div class="mindset-profit-foot"><span>Entry</span><span id="mindsetTpLabel">TP threshold</span><span id="mindsetTrailLabel">Trail activation</span></div></div><div class="defense-grid"><div class="defense-cell"><div class="k">Adaptive defence</div><div class="v" id="defenseState">Flat</div><div class="defense-score"><span id="defenseBar"></span></div><div class="n" id="defenseEvidence">Waiting for a position</div></div><div class="defense-cell"><div class="k">Position anchor</div><div class="v" id="positionVersion">Version —</div><div class="n" id="positionAnchor">Exchange average not active</div></div><div class="defense-cell"><div class="k">Market structure</div><div class="v" id="pivotStructure">Unclassified</div><div class="n" id="pivotLevels">Confirmed pivots · shadow</div></div><div class="defense-cell"><div class="k">Post-stop read</div><div class="v" id="stopBlownState">Inactive</div><div class="n" id="stopBlownScores">SB1–SB5 shadow observer</div></div></div></div></section>
-<section class="card span12"><h2>Mission Control <span class="method-badge">performance-first · ledger P&L · live risk</span></h2><div class="metric-row"><div class="metric"><div class="label">Starting Capital / Baseline</div><div class="val" id="startingCapital">—</div><div class="mini" id="baselineSource">Baseline source —</div></div><div class="metric"><div class="label">Larry Equity</div><div class="val" id="currentCapital">—</div><div class="mini" id="currentCapitalMini">Baseline + Larry ledger P&L</div></div><div class="metric"><div class="label">Larry Net P&L</div><div class="val" id="netPnl">—</div><div class="mini">Ledger realized + live bot UPL</div></div><div class="metric"><div class="label">Larry Return on Capital</div><div class="val" id="netReturn">—</div><div class="mini">Larry P&L / baseline</div></div></div><div class="pnl-note" id="pnlMethodNote">Every figure on this dashboard measures Larry's strategy only — its own ledger, net of Larry's fees. Manual trading is tracked in a single tile below and never mixed into Larry's numbers.</div></section>
-<section class="card span12"><h2>Performance vs BTC Buy & Hold <span class="method-badge">same starting capital · live BTC benchmark</span></h2><div class="metric-row"><div class="metric"><div class="label">Larry Equity</div><div class="val" id="paLarryEquity">—</div><div class="mini" id="paLarryNote">Starting capital + Larry P&L</div></div><div class="metric"><div class="label">BTC Benchmark Value</div><div class="val" id="paBtcValue">—</div><div class="mini" id="paBtcNote">Synthetic BTC bought at inception</div></div><div class="metric"><div class="label">BTC Benchmark Return</div><div class="val" id="paBtcReturn">—</div><div class="mini" id="paBtcPriceNote">—</div></div><div class="metric"><div class="label">Larry Alpha</div><div class="val" id="paAlpha">—</div><div class="mini" id="paAlphaNote">Larry return minus BTC return</div></div></div><div class="metric-row"><div class="metric"><div class="label">Trades</div><div class="val" id="paTrades">—</div><div class="mini" id="paWinRate">Win rate —</div></div><div class="metric"><div class="label">Profit Factor</div><div class="val" id="paProfitFactor">—</div><div class="mini" id="paExpectancy">Expectancy —</div></div><div class="metric"><div class="label">Avg Winner / Loser</div><div class="val" id="paAvgWinLoss">—</div><div class="mini">Realized net trade P&L</div></div><div class="metric"><div class="label">Market Exposure</div><div class="val" id="paExposure">—</div><div class="mini" id="paExposureNote">Long / Short / Flat since start</div></div></div><div class="pnl-visual"><div class="pnl-bar-title">Larry vs BTC Return</div><div class="pnl-bars" id="paReturnBars"><div class="mini">Loading benchmark…</div></div></div><div class="pnl-note" id="paMethodNote">Benchmark uses the same Starting Capital / Baseline. BTC start price uses capital_state if available; otherwise the first successful Larry trade price is used as a transparent proxy.</div></section>
+<section class="card span12 authority-card"><h2>Position Authority <span class="method-badge">Coinbase truth ? execution permission</span></h2><div class="management-alert flat" id="managementAlert"><div><div class="ma-title" id="managementTitle">Checking position authority?</div><div class="ma-note" id="managementNote">Larry is reconciling the live Coinbase position with persisted bot ownership.</div></div><div class="ma-badge" id="managementBadge">CHECKING</div></div></section>
+<section class="card span12"><h2>Larry Decision Pipeline <span class="method-badge">live mindset ? triggers ? conviction ? profit protection</span></h2><div class="mindset-shell"><div class="mindset-head"><div><div class="mindset-kicker">Current decision</div><div class="mindset-decision" id="mindsetDecision">Loading Larry's current state...</div><div class="mindset-reason" id="mindsetReason">Reading the current engine cycle, live position, and exit plan.</div></div><div class="mindset-badge" id="mindsetBadge">WAITING</div></div><div class="mindset-flow"><div class="mindset-step" id="mindsetRegimeStep"><div class="mindset-label">Market regime</div><div class="mindset-value" id="mindsetRegime">?</div><div class="mindset-note" id="mindsetRegimeNote">Macro and funding gates</div></div><div class="mindset-step" id="mindsetTriggerStep"><div class="mindset-label">Trigger score</div><div class="mindset-value" id="mindsetTrigger">?</div><div class="mindset-note" id="mindsetTriggerNote">Arm and commit progress</div></div><div class="mindset-step" id="mindsetConvictionStep"><div class="mindset-label">Conviction</div><div class="mindset-value" id="mindsetConviction">?</div><div class="mindset-note" id="mindsetConvictionNote">Target size from confidence</div></div><div class="mindset-step" id="mindsetPositionStep"><div class="mindset-label">Position plan</div><div class="mindset-value" id="mindsetPosition">?</div><div class="mindset-note" id="mindsetPositionNote">Live exchange position</div></div><div class="mindset-step" id="mindsetExitStep"><div class="mindset-label">Exit plan</div><div class="mindset-value" id="mindsetExit">?</div><div class="mindset-note" id="mindsetExitNote">TP, trailing stop, and ATR protection</div></div></div><div class="mindset-profit"><div class="mindset-profit-head"><div class="mindset-profit-title">Profit-protection progress</div><div class="mindset-profit-value" id="mindsetProfitValue">Flat / waiting</div></div><div class="mindset-track"><div class="mindset-fill" id="mindsetProfitFill"></div><div class="mindset-marker" id="mindsetTpMarker" style="left:50%"></div></div><div class="mindset-profit-foot"><span>Entry</span><span id="mindsetTpLabel">TP threshold</span><span id="mindsetTrailLabel">Trail activation</span></div></div><div class="defense-grid"><div class="defense-cell"><div class="k">Adaptive defence</div><div class="v" id="defenseState">Flat</div><div class="defense-score"><span id="defenseBar"></span></div><div class="n" id="defenseEvidence">Waiting for a position</div></div><div class="defense-cell"><div class="k">Position anchor</div><div class="v" id="positionVersion">Version ?</div><div class="n" id="positionAnchor">Exchange average not active</div></div><div class="defense-cell"><div class="k">Market structure</div><div class="v" id="pivotStructure">Unclassified</div><div class="n" id="pivotLevels">Confirmed pivots ? shadow</div></div><div class="defense-cell"><div class="k">Post-stop read</div><div class="v" id="stopBlownState">Inactive</div><div class="n" id="stopBlownScores">SB1?SB5 shadow observer</div></div></div></div></section>
+<section class="card span12"><h2>Mission Control <span class="method-badge">performance-first ? ledger P&L ? live risk</span></h2><div class="metric-row"><div class="metric"><div class="label">Starting Capital / Baseline</div><div class="val" id="startingCapital">?</div><div class="mini" id="baselineSource">Baseline source ?</div></div><div class="metric"><div class="label">Larry Equity</div><div class="val" id="currentCapital">?</div><div class="mini" id="currentCapitalMini">Baseline + Larry ledger P&L</div></div><div class="metric"><div class="label">Larry Net P&L</div><div class="val" id="netPnl">?</div><div class="mini">Ledger realized + live bot UPL</div></div><div class="metric"><div class="label">Larry Return on Capital</div><div class="val" id="netReturn">?</div><div class="mini">Larry P&L / baseline</div></div></div><div class="pnl-note" id="pnlMethodNote">Every figure on this dashboard measures Larry's strategy only ? its own ledger, net of Larry's fees. Manual trading is tracked in a single tile below and never mixed into Larry's numbers.</div></section>
+<section class="card span12"><h2>Performance vs BTC Buy & Hold <span class="method-badge">same starting capital ? live BTC benchmark</span></h2><div class="metric-row"><div class="metric"><div class="label">Larry Equity</div><div class="val" id="paLarryEquity">?</div><div class="mini" id="paLarryNote">Starting capital + Larry P&L</div></div><div class="metric"><div class="label">BTC Benchmark Value</div><div class="val" id="paBtcValue">?</div><div class="mini" id="paBtcNote">Synthetic BTC bought at inception</div></div><div class="metric"><div class="label">BTC Benchmark Return</div><div class="val" id="paBtcReturn">?</div><div class="mini" id="paBtcPriceNote">?</div></div><div class="metric"><div class="label">Larry Alpha</div><div class="val" id="paAlpha">?</div><div class="mini" id="paAlphaNote">Larry return minus BTC return</div></div></div><div class="metric-row"><div class="metric"><div class="label">Trades</div><div class="val" id="paTrades">?</div><div class="mini" id="paWinRate">Win rate ?</div></div><div class="metric"><div class="label">Profit Factor</div><div class="val" id="paProfitFactor">?</div><div class="mini" id="paExpectancy">Expectancy ?</div></div><div class="metric"><div class="label">Avg Winner / Loser</div><div class="val" id="paAvgWinLoss">?</div><div class="mini">Realized net trade P&L</div></div><div class="metric"><div class="label">Market Exposure</div><div class="val" id="paExposure">?</div><div class="mini" id="paExposureNote">Long / Short / Flat since start</div></div></div><div class="pnl-visual"><div class="pnl-bar-title">Larry vs BTC Return</div><div class="pnl-bars" id="paReturnBars"><div class="mini">Loading benchmark?</div></div></div><div class="pnl-note" id="paMethodNote">Benchmark uses the same Starting Capital / Baseline. BTC start price uses capital_state if available; otherwise the first successful Larry trade price is used as a transparent proxy.</div></section>
 
-<section class="card span12"><h2>Trade Map & Performance <span class="method-badge">BTC price · Larry trades · trade P&L bars</span></h2><div class="trade-map-controls" id="tradeMapControls"><button class="tm-btn on" data-range="1M">1M</button><button class="tm-btn" data-range="1D">1D</button><button class="tm-btn" data-range="1W">1W</button><button class="tm-btn" data-range="YTD">YTD</button><button class="tm-btn" data-range="12M">12M</button><button class="tm-btn" data-range="ALL">ALL</button></div><div class="tm-marker-summary"><div class="tm-stat"><div class="label">Markers (range view)</div><div class="val" id="tmTradeCount">—</div></div><div class="tm-stat"><div class="label">Larry Return (range)</div><div class="val" id="tmVisiblePnl">—</div></div><div class="tm-stat"><div class="label">BTC move</div><div class="val" id="tmBtcMove">—</div></div><div class="tm-stat"><div class="label">Range</div><div class="val" id="tmRangeLabel">1M</div></div></div><div class="trade-map-wrap"><div class="trade-map-canvas-box"><canvas id="tradeMapPriceCanvas" class="trade-map-canvas"></canvas><div class="tm-tip" id="tradeMapTip"></div></div><div class="trade-map-canvas-box"><canvas id="tradeMapPnlCanvas" class="trade-map-canvas trade-map-pnl"></canvas><div class="tm-tip" id="tradeMapPnlTip"></div></div></div><div class="trade-map-legend"><span class="tm-legend-pill">🟢 BUY / ADD</span><span class="tm-legend-pill">🟡 TP / partial sell</span><span class="tm-legend-pill">🔴 STOP / flatten</span><span class="tm-legend-pill">⚪ Other / failed</span><span class="tm-legend-pill">Line 1: BTC price</span><span class="tm-legend-pill">Chart 2: Trade net P&L bars</span></div><div class="tm-note" id="tradeMapNote">Trade markers come from Larry’s ledger. BTC price uses Coinbase candles. The lower chart shows each realized trade as a green gain or red loss.</div></section>
-<section class="card span12"><h2>Larry Equity Curve &amp; Drawdown <span class="method-badge">ledger-reconstructed · risk-adjusted</span></h2><div class="metric-row"><div class="metric"><div class="label">Max Drawdown</div><div class="val" id="eqMaxDD">—</div><div class="mini" id="eqMaxDDNote">Peak-to-trough on Larry equity</div></div><div class="metric"><div class="label">Sharpe (annualized)</div><div class="val" id="eqSharpe">—</div><div class="mini" id="eqSharpeNote">From daily returns</div></div><div class="metric"><div class="label">Peak Equity</div><div class="val" id="eqPeak">—</div><div class="mini">Highest Larry equity reached</div></div><div class="metric"><div class="label">Current Equity</div><div class="val" id="eqCurrent">—</div><div class="mini">Baseline + Larry realized P&L</div></div></div><div class="trade-map-canvas-box" style="margin-top:12px"><canvas id="equityCurveCanvas" class="trade-map-canvas"></canvas><div class="tm-tip" id="equityCurveTip"></div></div><div class="pnl-note" id="eqNote">Reconstructed from Larry’s realized-trade ledger: equity = baseline + cumulative net realized P&L. Drawdown and Sharpe are computed from this curve and update from day one. Intra-trade mark-to-market smoothing will follow once periodic equity snapshots accumulate.</div></section>
-<section class="card span12"><h2>Larry Trade P&L Tape <span class="method-badge">ledger source of truth · net trade impact</span></h2><div class="metric-row"><div class="metric"><div class="label">Larry Realized P&L</div><div class="val" id="larryRealizedPnl">—</div><div class="mini">Sum of net realized P&L from Larry ledger</div></div><div class="metric"><div class="label">Open Bot Unrealized</div><div class="val" id="larryOpenUnrealized">—</div><div class="mini" id="larryOpenNote">Live Coinbase open bot position</div></div><div class="metric"><div class="label">Larry Total P&L</div><div class="val" id="larryTotalPnl">—</div><div class="mini">Net realized + open unrealized</div></div><div class="metric"><div class="label">Last Realized Trade</div><div class="val" id="larryLastTradePnl">—</div><div class="mini" id="larryLastTradeNote">—</div></div></div><div class="pnl-visual"><div class="pnl-bar-title">Larry P&L Composition</div><div class="pnl-bars" id="larryPnlBars"><div class="mini">Loading P&L bars…</div></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>Intent</th><th>Reason</th><th>Action</th><th>Contracts</th><th>Fill</th><th>Gross</th><th>Fees</th><th>Net</th><th>Slip</th><th>M/T</th></tr></thead><tbody id="larryTradeTapeBody"><tr><td colspan="11" class="muted">Loading Larry ledger…</td></tr></tbody></table></div><div class="pnl-note" id="larryAccountingNote">Larry P&L comes from Larry’s own trade ledger: realized net trade impacts plus live open bot UPL, net of Larry’s fees. Manual trading is excluded and shown only in the Manual Trading Impact tile.</div><div class="pnl-note" id="larryRiskGateNote">Risk gate status loading…</div></section>
-<section class="card span12 macro-card"><h2>Macro Regime / Trading Gate <span class="method-badge">50h / 200h SMA regime filter</span></h2><div class="macro-top"><div><div id="tradeStatus" class="status-banner unknown"><span>Trading Gate</span><strong>—</strong></div><div class="macro-state" id="macroRegime">—</div><div class="sub" id="macroReason">—</div></div><div><div class="macro-grid"><div class="metric"><div class="label">BTC Price</div><div class="val" id="macroPrice">—</div></div><div class="metric"><div class="label">Fast SMA <span id="macroFastPeriod"></span></div><div class="val" id="macroFast">—</div></div><div class="metric"><div class="label">Slow SMA <span id="macroSlowPeriod"></span></div><div class="val" id="macroSlow">—</div></div><div class="metric"><div class="label">Gate</div><div class="val" id="macroGate">—</div></div><div class="metric"><div class="label">Price &gt; Fast</div><div class="val check" id="macroAboveFast">—</div></div><div class="metric"><div class="label">Price &gt; Slow</div><div class="val check" id="macroAboveSlow">—</div></div><div class="metric"><div class="label">Fast &gt; Slow</div><div class="val check" id="macroFastAboveSlow">—</div></div><div class="metric"><div class="label">Fast vs Slow</div><div class="val" id="macroDistSpread">—</div></div></div><div class="metric-row"><div class="metric"><div class="label">Price vs Fast SMA</div><div class="val" id="macroDistFast">—</div></div><div class="metric"><div class="label">Price vs Slow SMA</div><div class="val" id="macroDistSlow">—</div></div><div class="metric"><div class="label">ATR Stop</div><div class="val" id="atrStop">—</div></div><div class="metric"><div class="label">TSL Activation / Trail</div><div class="val"><span id="tslAct">—</span> / <span id="tslTrail">—</span></div></div></div><div class="pnl-note">Config source: <span id="configSource">—</span></div></div></div></section>
-<section class="card span12"><h2>Live Perp Position Risk Card <span class="method-badge">Gemini-style risk view · live Coinbase position</span></h2><div id="perpRiskCard"><div class="muted">Loading position risk…</div></div></section>
-<section class="card span12"><h2>Operator Kill Switch <span class="method-badge">v12 safety control · no order placement when halted</span></h2><div class="halt-panel"><div id="haltStatusBox" class="halt-status off">Kill switch status loading…</div><div><div class="kv"><span class="k">Reason</span><span class="v" id="haltReason">—</span></div><div class="kv"><span class="k">Set by / at</span><span class="v" id="haltSetBy">—</span></div></div><div class="halt-actions"><button class="btn btn-danger" onclick="setKillSwitch(true)">HALT BOT</button><button class="btn" onclick="setKillSwitch(false)">Resume</button><button class="btn btn-danger" onclick="emergencyFlatten()">EMERGENCY CLOSE FUTURES</button></div></div><div class="pnl-note">HALT means Larry skips new order placement. EMERGENCY CLOSE first halts Larry, then sends market orders to flatten ALL live Coinbase futures exposure -- including manually-entered positions, not just bot-managed ones. Confirm Coinbase UI after use.</div></section>
-<section class="card span12"><h2>BTC Perp Strategy Transparency <span class="method-badge">TP1 · ATR lock · confidence sizing · signal lock / reversal probe · why-no-trade diagnostics · progressive add-ons</span></h2><div id="v12ManualBanner" class="v12-banner">Loading strategy controls…</div><div class="v12-grid"><div class="v12-card"><div class="v12-title">TP1 Partial Take Profit</div><div class="v12-val" id="v12Tp1Status">—</div><div class="v12-note" id="v12Tp1Note">—</div></div><div class="v12-card"><div class="v12-title">ATR Locked at Entry</div><div class="v12-val" id="v12AtrLock">—</div><div class="v12-note" id="v12AtrNote">—</div></div><div class="v12-card"><div class="v12-title">Confidence Target Sizing</div><div class="v12-val" id="v12Sizing">—</div><div class="v12-note" id="v12SizingNote">—</div></div><div class="v12-card"><div class="v12-title">Funding Size Modifier</div><div class="v12-val" id="v12Funding">—</div><div class="v12-note" id="v12FundingNote">—</div></div><div class="v12-card"><div class="v12-title">Per-Direction Cooldowns</div><div class="v12-val" id="v12Cooldowns">—</div><div class="v12-note" id="v12CooldownNote">—</div></div><div class="v12-card"><div class="v12-title">Manual Position Mode</div><div class="v12-val" id="v12ManualMode">—</div><div class="v12-note" id="v12ManualNote">—</div></div><div class="v12-card"><div class="v12-title">Phantom Confirmation</div><div class="v12-val" id="v12Phantom">—</div><div class="v12-note" id="v12PhantomNote">—</div></div><div class="v12-card"><div class="v12-title">Signal P&L / Slippage</div><div class="v12-val" id="v12SignalPnl">—</div><div class="v12-note" id="v12SignalPnlNote">—</div><div class="v12-actions"><button class="btn btn-small" onclick="loadSignalPnlRollup()">Load Rollup</button><a class="btn btn-small" href="/api/signal_pnl_rollup" target="_blank">Open API</a></div></div></div><div id="signalPnlRollupBox" class="rollup-table mini"></div></section>
-<section class="card span12"><h2>Entry Lifecycle / Signal Lock / Reversal Probe <span class="method-badge">v15 finite-state entry machine</span></h2><div class="v12-grid"><div class="v12-card"><div class="v12-title">Lifecycle State</div><div class="v12-val" id="lifeState">—</div><div class="v12-note" id="lifeStateNote">—</div></div><div class="v12-card"><div class="v12-title">Locked Setup</div><div class="v12-val" id="lifeLockedSetup">—</div><div class="v12-note" id="lifeLockedNote">—</div></div><div class="v12-card"><div class="v12-title">Validity Window</div><div class="v12-val" id="lifeValidity">—</div><div class="v12-note" id="lifeValidityNote">—</div></div><div class="v12-card"><div class="v12-title">Hysteresis / Cancel</div><div class="v12-val" id="lifeHysteresis">—</div><div class="v12-note" id="lifeHysteresisNote">—</div></div><div class="v12-card"><div class="v12-title">Commitment Rule</div><div class="v12-val" id="lifeCommitRule">—</div><div class="v12-note" id="lifeCommitNote">—</div></div><div class="v12-card"><div class="v12-title">Why Waiting?</div><div class="v12-val" id="lifeWhyWaiting">—</div><div class="v12-note" id="lifeWhyNote">—</div></div></div><div class="pnl-note">Lifecycle flow: MONITORING → PHANTOM_ARMED → EXTENSION_CONFIRMED → COMMITTED_ENTRY → EXECUTED. Once armed, Larry freezes the setup for the configured validity window so minor score wobble does not create a moving target.</div></section>
+<section class="card span12"><h2>Trade Map & Performance <span class="method-badge">BTC price ? Larry trades ? trade P&L bars</span></h2><div class="trade-map-controls" id="tradeMapControls"><button class="tm-btn on" data-range="1M">1M</button><button class="tm-btn" data-range="1D">1D</button><button class="tm-btn" data-range="1W">1W</button><button class="tm-btn" data-range="YTD">YTD</button><button class="tm-btn" data-range="12M">12M</button><button class="tm-btn" data-range="ALL">ALL</button></div><div class="tm-marker-summary"><div class="tm-stat"><div class="label">Markers (range view)</div><div class="val" id="tmTradeCount">?</div></div><div class="tm-stat"><div class="label">Larry Return (range)</div><div class="val" id="tmVisiblePnl">?</div></div><div class="tm-stat"><div class="label">BTC move</div><div class="val" id="tmBtcMove">?</div></div><div class="tm-stat"><div class="label">Range</div><div class="val" id="tmRangeLabel">1M</div></div></div><div class="trade-map-wrap"><div class="trade-map-canvas-box"><canvas id="tradeMapPriceCanvas" class="trade-map-canvas"></canvas><div class="tm-tip" id="tradeMapTip"></div></div><div class="trade-map-canvas-box"><canvas id="tradeMapPnlCanvas" class="trade-map-canvas trade-map-pnl"></canvas><div class="tm-tip" id="tradeMapPnlTip"></div></div></div><div class="trade-map-legend"><span class="tm-legend-pill">?? BUY / ADD</span><span class="tm-legend-pill">?? TP / partial sell</span><span class="tm-legend-pill">?? STOP / flatten</span><span class="tm-legend-pill">? Other / failed</span><span class="tm-legend-pill">Line 1: BTC price</span><span class="tm-legend-pill">Chart 2: Trade net P&L bars</span></div><div class="tm-note" id="tradeMapNote">Trade markers come from Larry?s ledger. BTC price uses Coinbase candles. The lower chart shows each realized trade as a green gain or red loss.</div></section>
+<section class="card span12"><h2>Larry Equity Curve &amp; Drawdown <span class="method-badge">ledger-reconstructed ? risk-adjusted</span></h2><div class="metric-row"><div class="metric"><div class="label">Max Drawdown</div><div class="val" id="eqMaxDD">?</div><div class="mini" id="eqMaxDDNote">Peak-to-trough on Larry equity</div></div><div class="metric"><div class="label">Sharpe (annualized)</div><div class="val" id="eqSharpe">?</div><div class="mini" id="eqSharpeNote">From daily returns</div></div><div class="metric"><div class="label">Peak Equity</div><div class="val" id="eqPeak">?</div><div class="mini">Highest Larry equity reached</div></div><div class="metric"><div class="label">Current Equity</div><div class="val" id="eqCurrent">?</div><div class="mini">Baseline + Larry realized P&L</div></div></div><div class="trade-map-canvas-box" style="margin-top:12px"><canvas id="equityCurveCanvas" class="trade-map-canvas"></canvas><div class="tm-tip" id="equityCurveTip"></div></div><div class="pnl-note" id="eqNote">Reconstructed from Larry?s realized-trade ledger: equity = baseline + cumulative net realized P&L. Drawdown and Sharpe are computed from this curve and update from day one. Intra-trade mark-to-market smoothing will follow once periodic equity snapshots accumulate.</div></section>
+<section class="card span12"><h2>Larry Trade P&L Tape <span class="method-badge">ledger source of truth ? net trade impact</span></h2><div class="metric-row"><div class="metric"><div class="label">Larry Realized P&L</div><div class="val" id="larryRealizedPnl">?</div><div class="mini">Sum of net realized P&L from Larry ledger</div></div><div class="metric"><div class="label">Open Bot Unrealized</div><div class="val" id="larryOpenUnrealized">?</div><div class="mini" id="larryOpenNote">Live Coinbase open bot position</div></div><div class="metric"><div class="label">Larry Total P&L</div><div class="val" id="larryTotalPnl">?</div><div class="mini">Net realized + open unrealized</div></div><div class="metric"><div class="label">Last Realized Trade</div><div class="val" id="larryLastTradePnl">?</div><div class="mini" id="larryLastTradeNote">?</div></div></div><div class="pnl-visual"><div class="pnl-bar-title">Larry P&L Composition</div><div class="pnl-bars" id="larryPnlBars"><div class="mini">Loading P&L bars?</div></div></div><div class="table-wrap"><table class="table"><thead><tr><th>Time</th><th>Intent</th><th>Reason</th><th>Action</th><th>Contracts</th><th>Fill</th><th>Gross</th><th>Fees</th><th>Net</th><th>Slip</th><th>M/T</th></tr></thead><tbody id="larryTradeTapeBody"><tr><td colspan="11" class="muted">Loading Larry ledger?</td></tr></tbody></table></div><div class="pnl-note" id="larryAccountingNote">Larry P&L comes from Larry?s own trade ledger: realized net trade impacts plus live open bot UPL, net of Larry?s fees. Manual trading is excluded and shown only in the Manual Trading Impact tile.</div><div class="pnl-note" id="larryRiskGateNote">Risk gate status loading?</div></section>
+<section class="card span12 macro-card"><h2>Macro Regime / Trading Gate <span class="method-badge">50h / 200h SMA regime filter</span></h2><div class="macro-top"><div><div id="tradeStatus" class="status-banner unknown"><span>Trading Gate</span><strong>?</strong></div><div class="macro-state" id="macroRegime">?</div><div class="sub" id="macroReason">?</div></div><div><div class="macro-grid"><div class="metric"><div class="label">BTC Price</div><div class="val" id="macroPrice">?</div></div><div class="metric"><div class="label">Fast SMA <span id="macroFastPeriod"></span></div><div class="val" id="macroFast">?</div></div><div class="metric"><div class="label">Slow SMA <span id="macroSlowPeriod"></span></div><div class="val" id="macroSlow">?</div></div><div class="metric"><div class="label">Gate</div><div class="val" id="macroGate">?</div></div><div class="metric"><div class="label">Price &gt; Fast</div><div class="val check" id="macroAboveFast">?</div></div><div class="metric"><div class="label">Price &gt; Slow</div><div class="val check" id="macroAboveSlow">?</div></div><div class="metric"><div class="label">Fast &gt; Slow</div><div class="val check" id="macroFastAboveSlow">?</div></div><div class="metric"><div class="label">Fast vs Slow</div><div class="val" id="macroDistSpread">?</div></div></div><div class="metric-row"><div class="metric"><div class="label">Price vs Fast SMA</div><div class="val" id="macroDistFast">?</div></div><div class="metric"><div class="label">Price vs Slow SMA</div><div class="val" id="macroDistSlow">?</div></div><div class="metric"><div class="label">ATR Stop</div><div class="val" id="atrStop">?</div></div><div class="metric"><div class="label">TSL Activation / Trail</div><div class="val"><span id="tslAct">?</span> / <span id="tslTrail">?</span></div></div></div><div class="pnl-note">Config source: <span id="configSource">?</span></div></div></div></section>
+<section class="card span12"><h2>Live Perp Position Risk Card <span class="method-badge">Gemini-style risk view ? live Coinbase position</span></h2><div id="perpRiskCard"><div class="muted">Loading position risk?</div></div></section>
+<section class="card span12"><h2>Operator Kill Switch <span class="method-badge">v12 safety control ? no order placement when halted</span></h2><div class="halt-panel"><div id="haltStatusBox" class="halt-status off">Kill switch status loading?</div><div><div class="kv"><span class="k">Reason</span><span class="v" id="haltReason">?</span></div><div class="kv"><span class="k">Set by / at</span><span class="v" id="haltSetBy">?</span></div></div><div class="halt-actions"><button class="btn btn-danger" onclick="setKillSwitch(true)">HALT BOT</button><button class="btn" onclick="setKillSwitch(false)">Resume</button><button class="btn btn-danger" onclick="emergencyFlatten()">EMERGENCY CLOSE FUTURES</button></div></div><div class="pnl-note">HALT means Larry skips new order placement. EMERGENCY CLOSE first halts Larry, then sends market orders to flatten ALL live Coinbase futures exposure -- including manually-entered positions, not just bot-managed ones. Confirm Coinbase UI after use.</div></section>
+<section class="card span12"><h2>BTC Perp Strategy Transparency <span class="method-badge">TP1 ? ATR lock ? confidence sizing ? signal lock / reversal probe ? why-no-trade diagnostics ? progressive add-ons</span></h2><div id="v12ManualBanner" class="v12-banner">Loading strategy controls?</div><div class="v12-grid"><div class="v12-card"><div class="v12-title">TP1 Partial Take Profit</div><div class="v12-val" id="v12Tp1Status">?</div><div class="v12-note" id="v12Tp1Note">?</div></div><div class="v12-card"><div class="v12-title">ATR Locked at Entry</div><div class="v12-val" id="v12AtrLock">?</div><div class="v12-note" id="v12AtrNote">?</div></div><div class="v12-card"><div class="v12-title">Confidence Target Sizing</div><div class="v12-val" id="v12Sizing">?</div><div class="v12-note" id="v12SizingNote">?</div></div><div class="v12-card"><div class="v12-title">Funding Size Modifier</div><div class="v12-val" id="v12Funding">?</div><div class="v12-note" id="v12FundingNote">?</div></div><div class="v12-card"><div class="v12-title">Per-Direction Cooldowns</div><div class="v12-val" id="v12Cooldowns">?</div><div class="v12-note" id="v12CooldownNote">?</div></div><div class="v12-card"><div class="v12-title">Manual Position Mode</div><div class="v12-val" id="v12ManualMode">?</div><div class="v12-note" id="v12ManualNote">?</div></div><div class="v12-card"><div class="v12-title">Phantom Confirmation</div><div class="v12-val" id="v12Phantom">?</div><div class="v12-note" id="v12PhantomNote">?</div></div><div class="v12-card"><div class="v12-title">Signal P&L / Slippage</div><div class="v12-val" id="v12SignalPnl">?</div><div class="v12-note" id="v12SignalPnlNote">?</div><div class="v12-actions"><button class="btn btn-small" onclick="loadSignalPnlRollup()">Load Rollup</button><a class="btn btn-small" href="/api/signal_pnl_rollup" target="_blank">Open API</a></div></div></div><div id="signalPnlRollupBox" class="rollup-table mini"></div></section>
+<section class="card span12"><h2>Entry Lifecycle / Signal Lock / Reversal Probe <span class="method-badge">v15 finite-state entry machine</span></h2><div class="v12-grid"><div class="v12-card"><div class="v12-title">Lifecycle State</div><div class="v12-val" id="lifeState">?</div><div class="v12-note" id="lifeStateNote">?</div></div><div class="v12-card"><div class="v12-title">Locked Setup</div><div class="v12-val" id="lifeLockedSetup">?</div><div class="v12-note" id="lifeLockedNote">?</div></div><div class="v12-card"><div class="v12-title">Validity Window</div><div class="v12-val" id="lifeValidity">?</div><div class="v12-note" id="lifeValidityNote">?</div></div><div class="v12-card"><div class="v12-title">Hysteresis / Cancel</div><div class="v12-val" id="lifeHysteresis">?</div><div class="v12-note" id="lifeHysteresisNote">?</div></div><div class="v12-card"><div class="v12-title">Commitment Rule</div><div class="v12-val" id="lifeCommitRule">?</div><div class="v12-note" id="lifeCommitNote">?</div></div><div class="v12-card"><div class="v12-title">Why Waiting?</div><div class="v12-val" id="lifeWhyWaiting">?</div><div class="v12-note" id="lifeWhyNote">?</div></div></div><div class="pnl-note">Lifecycle flow: MONITORING ? PHANTOM_ARMED ? EXTENSION_CONFIRMED ? COMMITTED_ENTRY ? EXECUTED. Once armed, Larry freezes the setup for the configured validity window so minor score wobble does not create a moving target.</div></section>
 
-<section class="card span12"><h2>BTC Trigger Map <span class="method-badge">live price ladder · Spot / Perp / Risk levels</span></h2><div id="btcTriggerMap"><div class="muted">Loading BTC trigger levels…</div></div></section>
-<section class="card span12"><h2>Attribution / Risk Intelligence <span class="method-badge">manual book · slippage · drawdown · opportunity cost · health</span></h2><div class="intel-grid"><div class="intel-card goodborder"><div class="intel-title">Larry Bot Strategy P&L</div><div class="intel-val" id="intelLarryPnl">—</div><div class="intel-note" id="intelLarryNote">Excludes manual monitor-only exposure.</div></div><div class="intel-card manual"><div class="intel-title">Manual Trading Impact</div><div class="intel-val" id="intelManualBook">—</div><div class="intel-note" id="intelManualNote">The only place manual trading is tracked. Excluded from Larry.</div></div><div class="intel-card"><div class="intel-title">Risk Exposure Heatmap</div><div class="intel-val" id="intelExposure">—</div><div class="intel-note" id="intelExposureNote">Spot + Perp + net BTC delta.</div></div><div class="intel-card"><div class="intel-title">Execution Quality</div><div class="intel-val" id="intelSlippage">—</div><div class="intel-note" id="intelSlippageNote">Signed bps; positive = worse than mark.</div></div><div class="intel-card"><div class="intel-title">Opportunity Cost</div><div class="intel-val" id="intelOppCost">—</div><div class="intel-note" id="intelOppNote">Shows current blocked/skipped reasons.</div></div><div class="intel-card"><div class="intel-title">Drawdown Monitor</div><div class="intel-val" id="intelDrawdown">—</div><div class="intel-note" id="intelDrawdownNote">Current strategy and account drift.</div></div><div class="intel-card"><div class="intel-title">Funding Impact</div><div class="intel-val" id="intelFundingCost">—</div><div class="intel-note" id="intelFundingNote">Funding P&L and current funding gate.</div></div><div class="intel-card"><div class="intel-title">System Health</div><div class="intel-val" id="intelHealth">—</div><div class="intel-note" id="intelHealthNote">Heartbeat, state age, kill switch.</div></div></div></section>
-<section class="card span12" id="spotControlCard"><h3>Perp Focus / Spot Trading</h3><div class="cmd-row"><span class="pill" id="spotTradingPill">SPOT —</span><span class="pill" id="spotBridgePill">BRIDGE —</span></div><div class="pnl-note">Use this while debugging Larry Perp. Disabling Spot also disables the Spot→Perp bridge so only the Perp engine can create exposure.</div><div class="btn-row"><button class="btn danger" onclick="toggleSpot(false)">Disable Spot BTC</button><button class="btn" onclick="toggleSpot(true)">Enable Spot BTC</button></div><div class="pnl-note" id="spotToggleStatus">Spot toggle reads/writes strategy_config.json.</div></section>
+<section class="card span12"><h2>BTC Trigger Map <span class="method-badge">live price ladder ? Spot / Perp / Risk levels</span></h2><div id="btcTriggerMap"><div class="muted">Loading BTC trigger levels?</div></div></section>
+<section class="card span12"><h2>Attribution / Risk Intelligence <span class="method-badge">manual book ? slippage ? drawdown ? opportunity cost ? health</span></h2><div class="intel-grid"><div class="intel-card goodborder"><div class="intel-title">Larry Bot Strategy P&L</div><div class="intel-val" id="intelLarryPnl">?</div><div class="intel-note" id="intelLarryNote">Excludes manual monitor-only exposure.</div></div><div class="intel-card manual"><div class="intel-title">Manual Trading Impact</div><div class="intel-val" id="intelManualBook">?</div><div class="intel-note" id="intelManualNote">The only place manual trading is tracked. Excluded from Larry.</div></div><div class="intel-card"><div class="intel-title">Risk Exposure Heatmap</div><div class="intel-val" id="intelExposure">?</div><div class="intel-note" id="intelExposureNote">Spot + Perp + net BTC delta.</div></div><div class="intel-card"><div class="intel-title">Execution Quality</div><div class="intel-val" id="intelSlippage">?</div><div class="intel-note" id="intelSlippageNote">Signed bps; positive = worse than mark.</div></div><div class="intel-card"><div class="intel-title">Opportunity Cost</div><div class="intel-val" id="intelOppCost">?</div><div class="intel-note" id="intelOppNote">Shows current blocked/skipped reasons.</div></div><div class="intel-card"><div class="intel-title">Drawdown Monitor</div><div class="intel-val" id="intelDrawdown">?</div><div class="intel-note" id="intelDrawdownNote">Current strategy and account drift.</div></div><div class="intel-card"><div class="intel-title">Funding Impact</div><div class="intel-val" id="intelFundingCost">?</div><div class="intel-note" id="intelFundingNote">Funding P&L and current funding gate.</div></div><div class="intel-card"><div class="intel-title">System Health</div><div class="intel-val" id="intelHealth">?</div><div class="intel-note" id="intelHealthNote">Heartbeat, state age, kill switch.</div></div></div></section>
+<section class="card span12" id="spotControlCard"><h3>Perp Focus / Spot Trading</h3><div class="cmd-row"><span class="pill" id="spotTradingPill">SPOT ?</span><span class="pill" id="spotBridgePill">BRIDGE ?</span></div><div class="pnl-note">Use this while debugging Larry Perp. Disabling Spot also disables the Spot?Perp bridge so only the Perp engine can create exposure.</div><div class="btn-row"><button class="btn danger" onclick="toggleSpot(false)">Disable Spot BTC</button><button class="btn" onclick="toggleSpot(true)">Enable Spot BTC</button></div><div class="pnl-note" id="spotToggleStatus">Spot toggle reads/writes strategy_config.json.</div></section>
 
-<section class="card span12"><h2>Why Larry Is Not Trading <span class="method-badge">entry diagnostics · BTC perp only</span></h2>
+<section class="card span12"><h2>Why Larry Is Not Trading <span class="method-badge">entry diagnostics ? BTC perp only</span></h2>
   <div class="v12-grid">
-    <div class="v12-card"><div class="v12-title">Final Tradable Scores</div><div class="v12-val" id="diagScores">—</div><div class="v12-note" id="diagScoreNote">Engine score after Larry filters</div></div>
-    <div class="v12-card"><div class="v12-title">Opportunity Meter</div><div class="v12-val" id="oppLevel">—</div><div class="opp-meter" id="oppMeter"><div class="opp-dot"></div><div class="opp-dot"></div><div class="opp-dot"></div><div class="opp-dot"></div></div><div class="v12-note" id="oppNote">Raw setup quality before live order checks.</div></div>
-    <div class="v12-card"><div class="v12-title">LONG Setup Checklist</div><div class="v12-val" id="diagLongStatus">—</div><div class="v12-note" id="diagLongMissing">—</div></div>
-    <div class="v12-card"><div class="v12-title">SHORT Setup Checklist</div><div class="v12-val" id="diagShortStatus">—</div><div class="v12-note" id="diagShortMissing">—</div></div>
-    <div class="v12-card"><div class="v12-title">Reversal Probe</div><div class="v12-val" id="diagProbeStatus">—</div><div class="v12-note" id="diagProbeReason">—</div></div>
-    <div class="v12-card"><div class="v12-title">Macro / Funding</div><div class="v12-val" id="diagGates">—</div><div class="v12-note" id="diagGatesNote">—</div></div>
-    <div class="v12-card"><div class="v12-title">Next Possible Action</div><div class="v12-val" id="diagNextAction">—</div><div class="v12-note" id="diagNextNote">—</div></div>
+    <div class="v12-card"><div class="v12-title">Final Tradable Scores</div><div class="v12-val" id="diagScores">?</div><div class="v12-note" id="diagScoreNote">Engine score after Larry filters</div></div>
+    <div class="v12-card"><div class="v12-title">Opportunity Meter</div><div class="v12-val" id="oppLevel">?</div><div class="opp-meter" id="oppMeter"><div class="opp-dot"></div><div class="opp-dot"></div><div class="opp-dot"></div><div class="opp-dot"></div></div><div class="v12-note" id="oppNote">Raw setup quality before live order checks.</div></div>
+    <div class="v12-card"><div class="v12-title">LONG Setup Checklist</div><div class="v12-val" id="diagLongStatus">?</div><div class="v12-note" id="diagLongMissing">?</div></div>
+    <div class="v12-card"><div class="v12-title">SHORT Setup Checklist</div><div class="v12-val" id="diagShortStatus">?</div><div class="v12-note" id="diagShortMissing">?</div></div>
+    <div class="v12-card"><div class="v12-title">Reversal Probe</div><div class="v12-val" id="diagProbeStatus">?</div><div class="v12-note" id="diagProbeReason">?</div></div>
+    <div class="v12-card"><div class="v12-title">Macro / Funding</div><div class="v12-val" id="diagGates">?</div><div class="v12-note" id="diagGatesNote">?</div></div>
+    <div class="v12-card"><div class="v12-title">Next Possible Action</div><div class="v12-val" id="diagNextAction">?</div><div class="v12-note" id="diagNextNote">?</div></div>
   </div>
-  <div class="pnl-note" id="diagExplanation">Waiting for bot cycle diagnostics…</div>
+  <div class="pnl-note" id="diagExplanation">Waiting for bot cycle diagnostics?</div>
 </section>
 
-<details class="advanced-diagnostics"><summary><span>Advanced Diagnostics &amp; Controls</span><span class="method-badge">click to expand · detailed balances, signals, execution &amp; accounting</span></summary><div class="grid advanced-grid">
-<section class="card span12 collapsible-controls"><details id="strategyControlsDetails"><summary><span class="summary-title">Strategy Controls</span><span class="method-badge">click to expand · live config · no SSH required</span><span class="summary-hint" id="controlSummaryHint">Max / Derived Ladder / Candle Probe / Reversal Probe</span></summary><div class="control-grid"><label>TSL Activation %<input id="ctrlTSLAct" type="number" min="0.10" max="50" step="0.01" inputmode="decimal"></label><label>TSL Trail %<input id="ctrlTSLTrail" type="number" min="0.05" max="25" step="0.01" inputmode="decimal"></label><label>ATR Stop x<input id="ctrlATR" type="number" min="0.1" max="10" step="0.05" inputmode="decimal"></label><label>Phantom Extension %<input id="ctrlPhantom" type="number" min="0.05" max="10" step="0.01" inputmode="decimal"></label><label>Max Conviction Contracts<input id="ctrlMaxConviction" type="number" min="1" max="50" step="1"></label><label>Probe % of Max<input id="ctrlProbePct" type="number" min="5" max="100" step="1" inputmode="decimal"></label><label>Partial % of Max<input id="ctrlPartialPct" type="number" min="5" max="100" step="1" inputmode="decimal"></label><label>Strong % of Max<input id="ctrlStrongPct" type="number" min="5" max="100" step="1" inputmode="decimal"></label><label>Max Adds / Position<input id="ctrlMaxAdds" type="number" min="0" max="10" step="1"></label><label>Signal Lock / Reversal Probe Minutes<input id="ctrlSignalValidity" type="number" min="1" max="120" step="1"></label><label>Cancel Score<input id="ctrlSignalCancel" type="number" min="0" max="4" step="1"></label><label>Signal Lock / Reversal Probe<select id="ctrlSignalLock"><option value="true">On</option><option value="false">Off</option></select></label><label>Email Alerts<select id="ctrlEmail"><option value="true">On</option><option value="false">Off</option></select></label><label>Telegram Alerts<select id="ctrlTelegram"><option value="true">On</option><option value="false">Off</option></select></label><label>Telegram Errors<select id="ctrlTelegramErrors"><option value="true">On</option><option value="false">Off</option></select></label><label>Daily Telegram Summary<select id="ctrlTelegramDaily"><option value="true">On</option><option value="false">Off</option></select></label><label>Daily Summary Hour ET<input id="ctrlTelegramHour" type="number" min="0" max="23" step="1"></label><label>Max Leverage<input id="ctrlMaxLev" type="number" min="0" max="20" step="0.1" inputmode="decimal"></label><label>Futures Buffer $<input id="ctrlBuffer" type="number" min="0" step="25"></label><label>Cooldown Sec<input id="ctrlCooldown" type="number" min="0" step="30"></label><label>Spot Tranches %<input id="ctrlTranches" type="text" placeholder="25,33,50,90"></label><button class="btn save-btn" onclick="saveStrategyControls()">Save</button></div><div class="pnl-note" id="sizingPreview">Sizing preview loads with config.</div><div class="pnl-note" id="controlStatus">Strategy config path: gs://btc_trade_log/strategy_config.json. Bot reloads each cycle. Max Conviction is the only size knob. Probe/partial/strong/full are derived from Max × percentages and rounded to whole contracts. Candle-close confirmation enters the probe; phantom extension upgrades/adds toward partial.</div></details></section>
-<section class="card span6"><h2>Live Exposure & Leverage</h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Net BTC Delta</div><div class="val" id="portNetDelta">—</div><div class="mini" id="portDeltaMini">Spot BTC + signed Perp notional BTC</div></div><div class="metric"><div class="label">Perp Notional</div><div class="val" id="portNotional">—</div><div class="mini" id="portLeverage">—</div></div></div><div class="kv"><span class="k">Spot BTC</span><span class="v" id="portSpotBtc">—</span></div><div class="kv"><span class="k">Signed Perp BTC</span><span class="v" id="portPerpBtc">—</span></div><div class="kv"><span class="k">Exchange side/contracts</span><span class="v" id="portExchange">—</span></div><div class="pnl-note" id="portSummary">—</div></section>
-<section class="card span4"><h2>Futures / Perp Equity</h2><div class="big" id="futEquity">—</div><div class="sub">Coinbase futures total USD balance</div><div class="kv"><span class="k">Available margin</span><span class="v" id="availMargin">—</span></div><div class="kv"><span class="k">Buying power</span><span class="v" id="buyingPower">—</span></div><div class="kv"><span class="k">Initial margin</span><span class="v" id="initMargin">—</span></div><div class="kv"><span class="k">Liquidation buffer</span><span class="v" id="liqBuffer">—</span></div></section>
-<section class="card span4"><h2>Spot Treasury</h2><div class="big blue" id="spotValue">—</div><div class="sub">BTC mark value; cash excluded to avoid double count</div><div class="kv"><span class="k">USD cash</span><span class="v" id="spotUsd">—</span></div><div class="kv"><span class="k">USDC treasury</span><span class="v" id="spotUsdc">—</span></div><div class="kv"><span class="k">BTC value</span><span class="v" id="spotBtcUsd">—</span></div><div class="kv"><span class="k">BTC amount</span><span class="v" id="spotBtcAmt">—</span></div><div class="kv treasury-total"><span class="k">Accounts scanned</span><span class="v" id="spotAccountCount">—</span></div><div class="mini" id="spotSource">—</div></section>
-<section class="card span5"><h2>Spot Signal Monitor</h2><div class="score-pips" id="scorePips"><div class="score-pip"></div><div class="score-pip"></div><div class="score-pip"></div><div class="score-pip"></div></div><div class="sub" style="margin:8px 0 12px" id="scoreText">—</div><div id="signalCards"></div></section>
-<section class="card span4"><h2>Signal Score Reconciliation <span class="method-badge">raw monitor → filters → tradable score</span></h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Exchange Net Position</div><div class="val" id="perpNetPos">—</div><div class="mini" id="perpNetBtc">—</div></div><div class="metric"><div class="label">Lifecycle / Phantom</div><div class="val" id="phantomState">—</div><div class="mini" id="phantomDetail">—</div></div></div><div class="score-reconcile-grid"><div class="score-reconcile-card"><div class="title">Raw LONG Monitor</div><div class="value" id="perpLongScore">—</div><div id="perpLongPips"></div><div class="note" id="perpLongNote">Raw conditions only</div></div><div class="score-reconcile-card"><div class="title">Final LONG Score</div><div class="value" id="diagFinalLongScore">—</div><div class="note" id="diagFinalLongNote">Tradable score used by Larry</div></div><div class="score-reconcile-card"><div class="title">Raw SHORT Monitor</div><div class="value" id="perpShortScore">—</div><div id="perpShortPips"></div><div class="note" id="perpShortNote">Raw conditions only</div></div><div class="score-reconcile-card"><div class="title">Final SHORT Score</div><div class="value" id="diagFinalShortScore">—</div><div class="note" id="diagFinalShortNote">Tradable score used by Larry</div></div></div><div class="opportunity-banner" id="opportunityBanner">Loading opportunity diagnostics…</div>
+<details class="advanced-diagnostics"><summary><span>Advanced Diagnostics &amp; Controls</span><span class="method-badge">click to expand ? detailed balances, signals, execution &amp; accounting</span></summary><div class="grid advanced-grid">
+<section class="card span12 collapsible-controls"><details id="strategyControlsDetails"><summary><span class="summary-title">Strategy Controls</span><span class="method-badge">click to expand ? live config ? no SSH required</span><span class="summary-hint" id="controlSummaryHint">Max / Derived Ladder / Candle Probe / Reversal Probe</span></summary><div class="control-grid"><label>TSL Activation %<input id="ctrlTSLAct" type="number" min="0.10" max="50" step="0.01" inputmode="decimal"></label><label>TSL Trail %<input id="ctrlTSLTrail" type="number" min="0.05" max="25" step="0.01" inputmode="decimal"></label><label>ATR Stop x<input id="ctrlATR" type="number" min="0.1" max="10" step="0.05" inputmode="decimal"></label><label>Phantom Extension %<input id="ctrlPhantom" type="number" min="0.05" max="10" step="0.01" inputmode="decimal"></label><label>Max Conviction Contracts<input id="ctrlMaxConviction" type="number" min="1" max="50" step="1"></label><label>Probe % of Max<input id="ctrlProbePct" type="number" min="5" max="100" step="1" inputmode="decimal"></label><label>Partial % of Max<input id="ctrlPartialPct" type="number" min="5" max="100" step="1" inputmode="decimal"></label><label>Strong % of Max<input id="ctrlStrongPct" type="number" min="5" max="100" step="1" inputmode="decimal"></label><label>Max Adds / Position<input id="ctrlMaxAdds" type="number" min="0" max="10" step="1"></label><label>Signal Lock / Reversal Probe Minutes<input id="ctrlSignalValidity" type="number" min="1" max="120" step="1"></label><label>Cancel Score<input id="ctrlSignalCancel" type="number" min="0" max="4" step="1"></label><label>Signal Lock / Reversal Probe<select id="ctrlSignalLock"><option value="true">On</option><option value="false">Off</option></select></label><label>Email Alerts<select id="ctrlEmail"><option value="true">On</option><option value="false">Off</option></select></label><label>Telegram Alerts<select id="ctrlTelegram"><option value="true">On</option><option value="false">Off</option></select></label><label>Telegram Errors<select id="ctrlTelegramErrors"><option value="true">On</option><option value="false">Off</option></select></label><label>Daily Telegram Summary<select id="ctrlTelegramDaily"><option value="true">On</option><option value="false">Off</option></select></label><label>Daily Summary Hour ET<input id="ctrlTelegramHour" type="number" min="0" max="23" step="1"></label><label>Max Leverage<input id="ctrlMaxLev" type="number" min="0" max="20" step="0.1" inputmode="decimal"></label><label>Futures Buffer $<input id="ctrlBuffer" type="number" min="0" step="25"></label><label>Cooldown Sec<input id="ctrlCooldown" type="number" min="0" step="30"></label><label>Spot Tranches %<input id="ctrlTranches" type="text" placeholder="25,33,50,90"></label><button class="btn save-btn" onclick="saveStrategyControls()">Save</button></div><div class="pnl-note" id="sizingPreview">Sizing preview loads with config.</div><div class="pnl-note" id="controlStatus">Strategy config path: gs://btc_trade_log/strategy_config.json. Bot reloads each cycle. Max Conviction is the only size knob. Probe/partial/strong/full are derived from Max ? percentages and rounded to whole contracts. Candle-close confirmation enters the probe; phantom extension upgrades/adds toward partial.</div></details></section>
+<section class="card span6"><h2>Live Exposure & Leverage</h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Net BTC Delta</div><div class="val" id="portNetDelta">?</div><div class="mini" id="portDeltaMini">Spot BTC + signed Perp notional BTC</div></div><div class="metric"><div class="label">Perp Notional</div><div class="val" id="portNotional">?</div><div class="mini" id="portLeverage">?</div></div></div><div class="kv"><span class="k">Spot BTC</span><span class="v" id="portSpotBtc">?</span></div><div class="kv"><span class="k">Signed Perp BTC</span><span class="v" id="portPerpBtc">?</span></div><div class="kv"><span class="k">Exchange side/contracts</span><span class="v" id="portExchange">?</span></div><div class="pnl-note" id="portSummary">?</div></section>
+<section class="card span4"><h2>Futures / Perp Equity</h2><div class="big" id="futEquity">?</div><div class="sub">Coinbase futures total USD balance</div><div class="kv"><span class="k">Available margin</span><span class="v" id="availMargin">?</span></div><div class="kv"><span class="k">Buying power</span><span class="v" id="buyingPower">?</span></div><div class="kv"><span class="k">Initial margin</span><span class="v" id="initMargin">?</span></div><div class="kv"><span class="k">Liquidation buffer</span><span class="v" id="liqBuffer">?</span></div></section>
+<section class="card span4"><h2>Spot Treasury</h2><div class="big blue" id="spotValue">?</div><div class="sub">BTC mark value; cash excluded to avoid double count</div><div class="kv"><span class="k">USD cash</span><span class="v" id="spotUsd">?</span></div><div class="kv"><span class="k">USDC treasury</span><span class="v" id="spotUsdc">?</span></div><div class="kv"><span class="k">BTC value</span><span class="v" id="spotBtcUsd">?</span></div><div class="kv"><span class="k">BTC amount</span><span class="v" id="spotBtcAmt">?</span></div><div class="kv treasury-total"><span class="k">Accounts scanned</span><span class="v" id="spotAccountCount">?</span></div><div class="mini" id="spotSource">?</div></section>
+<section class="card span5"><h2>Spot Signal Monitor</h2><div class="score-pips" id="scorePips"><div class="score-pip"></div><div class="score-pip"></div><div class="score-pip"></div><div class="score-pip"></div></div><div class="sub" style="margin:8px 0 12px" id="scoreText">?</div><div id="signalCards"></div></section>
+<section class="card span4"><h2>Signal Score Reconciliation <span class="method-badge">raw monitor ? filters ? tradable score</span></h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Exchange Net Position</div><div class="val" id="perpNetPos">?</div><div class="mini" id="perpNetBtc">?</div></div><div class="metric"><div class="label">Lifecycle / Phantom</div><div class="val" id="phantomState">?</div><div class="mini" id="phantomDetail">?</div></div></div><div class="score-reconcile-grid"><div class="score-reconcile-card"><div class="title">Raw LONG Monitor</div><div class="value" id="perpLongScore">?</div><div id="perpLongPips"></div><div class="note" id="perpLongNote">Raw conditions only</div></div><div class="score-reconcile-card"><div class="title">Final LONG Score</div><div class="value" id="diagFinalLongScore">?</div><div class="note" id="diagFinalLongNote">Tradable score used by Larry</div></div><div class="score-reconcile-card"><div class="title">Raw SHORT Monitor</div><div class="value" id="perpShortScore">?</div><div id="perpShortPips"></div><div class="note" id="perpShortNote">Raw conditions only</div></div><div class="score-reconcile-card"><div class="title">Final SHORT Score</div><div class="value" id="diagFinalShortScore">?</div><div class="note" id="diagFinalShortNote">Tradable score used by Larry</div></div></div><div class="opportunity-banner" id="opportunityBanner">Loading opportunity diagnostics?</div>
 <div class="score-reconcile-grid" style="margin-top:10px">
-  <div class="score-reconcile-card"><div class="title">Current Signal Truth</div><div class="value" id="currentSignalTruth">—</div><div class="note" id="currentSignalTruthNote">Current cycle only</div></div>
-  <div class="score-reconcile-card"><div class="title">Last Sizing Decision</div><div class="value" id="lastSizingTruth">—</div><div class="note" id="lastSizingTruthNote">Historical, not a live trigger</div></div>
-  <div class="score-reconcile-card"><div class="title">Last Order / Execution</div><div class="value" id="lastExecutionTruth">—</div><div class="note" id="lastExecutionTruthNote">Historical order state</div></div>
-  <div class="score-reconcile-card"><div class="title">Live Trigger Status</div><div class="value" id="liveTriggerTruth">—</div><div class="note" id="liveTriggerTruthNote">Uses current score + risk + funding + lifecycle</div></div>
+  <div class="score-reconcile-card"><div class="title">Current Signal Truth</div><div class="value" id="currentSignalTruth">?</div><div class="note" id="currentSignalTruthNote">Current cycle only</div></div>
+  <div class="score-reconcile-card"><div class="title">Last Sizing Decision</div><div class="value" id="lastSizingTruth">?</div><div class="note" id="lastSizingTruthNote">Historical, not a live trigger</div></div>
+  <div class="score-reconcile-card"><div class="title">Last Order / Execution</div><div class="value" id="lastExecutionTruth">?</div><div class="note" id="lastExecutionTruthNote">Historical order state</div></div>
+  <div class="score-reconcile-card"><div class="title">Live Trigger Status</div><div class="value" id="liveTriggerTruth">?</div><div class="note" id="liveTriggerTruthNote">Uses current score + risk + funding + lifecycle</div></div>
 </div>
 <div class="pnl-note" id="perpNettingNote">Raw monitor may differ from final tradable score because Larry applies candle, macro, funding, risk-gate, phantom, and reversal-probe filters. Historical sizing/order fields are labelled separately so old 2/4 or 4/4 decisions do not look like current live triggers.</div></section>
-<section class="card span12"><h2>Core IAF Perp Engine Monitor <span class="method-badge">WorkingOG / risk-first rule stack</span></h2><div class="metric-row"><div class="metric"><div class="label">Framework</div><div class="val" id="iafFramework">—</div><div class="mini">Institutional J-curve model</div></div><div class="metric"><div class="label">Funding Gate</div><div class="val" id="iafFundingGate">—</div><div class="mini" id="iafFundingDetail">—</div></div><div class="metric"><div class="label">Phantom Delay</div><div class="val" id="iafPhantom">—</div><div class="mini" id="iafPhantomDetail">—</div></div><div class="metric"><div class="label">Safe Execution Rule</div><div class="val">NET TARGET</div><div class="mini" id="iafSafeRule">—</div></div></div><div class="rule-grid" id="iafRules" style="margin-top:10px"></div><div class="pnl-note">This panel does not place trades. It makes strategy drift visible by comparing the live unified setup with the original IAF/WorkingOG rules.</div></section>
+<section class="card span12"><h2>Core IAF Perp Engine Monitor <span class="method-badge">WorkingOG / risk-first rule stack</span></h2><div class="metric-row"><div class="metric"><div class="label">Framework</div><div class="val" id="iafFramework">?</div><div class="mini">Institutional J-curve model</div></div><div class="metric"><div class="label">Funding Gate</div><div class="val" id="iafFundingGate">?</div><div class="mini" id="iafFundingDetail">?</div></div><div class="metric"><div class="label">Phantom Delay</div><div class="val" id="iafPhantom">?</div><div class="mini" id="iafPhantomDetail">?</div></div><div class="metric"><div class="label">Safe Execution Rule</div><div class="val">NET TARGET</div><div class="mini" id="iafSafeRule">?</div></div></div><div class="rule-grid" id="iafRules" style="margin-top:10px"></div><div class="pnl-note">This panel does not place trades. It makes strategy drift visible by comparing the live unified setup with the original IAF/WorkingOG rules.</div></section>
 <section class="card span6"><h2>Open Perp Exposure</h2><div class="table-wrap"><table class="table"><thead><tr><th>Side</th><th>Contracts</th><th>BTC Exp.</th><th>Avg Entry</th><th>Mark</th><th>Book Unrealized</th><th>Cost Basis</th></tr></thead><tbody id="perpPosBody"></tbody></table></div></section>
-<section class="card span4 diagnostic-card"><h2>Legacy Clean Strategy Book <span class="method-badge">diagnostic</span></h2><div class="kv"><span class="k">Book avg entry</span><span class="v" id="bookAvg">—</span></div><div class="kv"><span class="k">Book open contracts</span><span class="v" id="bookContracts">—</span></div><div class="kv"><span class="k">Book unrealized P&L</span><span class="v" id="bookUnr">—</span></div><div class="kv"><span class="k">Closed P&L since reset</span><span class="v" id="realizedReset">—</span></div><div class="kv"><span class="k">Fees since tracking reset</span><span class="v" id="feesReset">—</span></div><div class="kv"><span class="k">Net book impact</span><span class="v" id="netBookImpact">—</span></div><div class="kv"><span class="k">New fills counted</span><span class="v" id="fillCount">—</span></div><div class="kv"><span class="k">Old fills ignored</span><span class="v" id="ignoredFillCount">—</span></div><div class="kv"><span class="k">Fee audit</span><span class="v"><a href="/api/fee_audit" target="_blank">Open</a></span></div><div class="pnl-note" id="tradePnlNote">—</div></section>
-<section class="card span6"><h2>Position Reconciler / Phantom Protection</h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Reconciler Status</div><div class="val" id="recStatus">—</div><div class="mini" id="recDetail">—</div></div><div class="metric"><div class="label">Target / Drift</div><div class="val" id="recOpening">—</div><div class="mini">Target exposure vs live Coinbase</div></div></div><div class="kv"><span class="k">Exchange net position</span><span class="v" id="recExchange">—</span></div><div class="kv"><span class="k">Local bot legs</span><span class="v" id="recBotLegs">—</span></div><div class="kv"><span class="k">Signed net contracts</span><span class="v" id="recSigned">—</span></div><div class="pnl-note" id="recSafeRule">—</div></section>
-<section class="card span6"><h2>Execution Quality <span class="method-badge">Larry ledger · costs & slippage</span></h2><div class="metric-row"><div class="metric"><div class="label">Avg Slippage</div><div class="val" id="execAvgSlip">—</div><div class="mini" id="execSlipRange">Best / worst —</div></div><div class="metric"><div class="label">Maker / Taker</div><div class="val" id="execMakerTaker">—</div><div class="mini" id="execMakerTakerNote">Larry orders</div></div><div class="metric"><div class="label">Fees Paid</div><div class="val" id="execFeesPaid">—</div><div class="mini">From Larry ledger</div></div><div class="metric"><div class="label">Execution Score</div><div class="val" id="execScore">—</div><div class="mini" id="execScoreNote">Preliminary</div></div></div><div class="pnl-note" id="execQualityNote">Execution quality summarizes Larry trade fills. Current market IOC orders should appear mostly/all taker.</div></section>
-<section class="card span4 diagnostic-card"><h2>Signal History <span class="method-badge">diagnostic</span></h2><div id="sigHistory" class="mini">—</div></section>
+<section class="card span4 diagnostic-card"><h2>Legacy Clean Strategy Book <span class="method-badge">diagnostic</span></h2><div class="kv"><span class="k">Book avg entry</span><span class="v" id="bookAvg">?</span></div><div class="kv"><span class="k">Book open contracts</span><span class="v" id="bookContracts">?</span></div><div class="kv"><span class="k">Book unrealized P&L</span><span class="v" id="bookUnr">?</span></div><div class="kv"><span class="k">Closed P&L since reset</span><span class="v" id="realizedReset">?</span></div><div class="kv"><span class="k">Fees since tracking reset</span><span class="v" id="feesReset">?</span></div><div class="kv"><span class="k">Net book impact</span><span class="v" id="netBookImpact">?</span></div><div class="kv"><span class="k">New fills counted</span><span class="v" id="fillCount">?</span></div><div class="kv"><span class="k">Old fills ignored</span><span class="v" id="ignoredFillCount">?</span></div><div class="kv"><span class="k">Fee audit</span><span class="v"><a href="/api/fee_audit" target="_blank">Open</a></span></div><div class="pnl-note" id="tradePnlNote">?</div></section>
+<section class="card span6"><h2>Position Reconciler / Phantom Protection</h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Reconciler Status</div><div class="val" id="recStatus">?</div><div class="mini" id="recDetail">?</div></div><div class="metric"><div class="label">Target / Drift</div><div class="val" id="recOpening">?</div><div class="mini">Target exposure vs live Coinbase</div></div></div><div class="kv"><span class="k">Exchange net position</span><span class="v" id="recExchange">?</span></div><div class="kv"><span class="k">Local bot legs</span><span class="v" id="recBotLegs">?</span></div><div class="kv"><span class="k">Signed net contracts</span><span class="v" id="recSigned">?</span></div><div class="pnl-note" id="recSafeRule">?</div></section>
+<section class="card span6"><h2>Execution Quality <span class="method-badge">Larry ledger ? costs & slippage</span></h2><div class="metric-row"><div class="metric"><div class="label">Avg Slippage</div><div class="val" id="execAvgSlip">?</div><div class="mini" id="execSlipRange">Best / worst ?</div></div><div class="metric"><div class="label">Maker / Taker</div><div class="val" id="execMakerTaker">?</div><div class="mini" id="execMakerTakerNote">Larry orders</div></div><div class="metric"><div class="label">Fees Paid</div><div class="val" id="execFeesPaid">?</div><div class="mini">From Larry ledger</div></div><div class="metric"><div class="label">Execution Score</div><div class="val" id="execScore">?</div><div class="mini" id="execScoreNote">Preliminary</div></div></div><div class="pnl-note" id="execQualityNote">Execution quality summarizes Larry trade fills. Current market IOC orders should appear mostly/all taker.</div></section>
+<section class="card span4 diagnostic-card"><h2>Signal History <span class="method-badge">diagnostic</span></h2><div id="sigHistory" class="mini">?</div></section>
 <section class="card span12 diagnostic-card"><h2>Detailed Accounting / Reference <span class="method-badge">diagnostic</span></h2><div class="table-wrap"><table class="table"><thead><tr><th>Book</th><th>Current Value / Basis</th><th>Clean Realized</th><th>Clean Unrealized</th><th>Funding</th><th>Fees</th><th>Notes</th></tr></thead><tbody id="acctBody"></tbody></table></div><div class="pnl-note">Clean performance uses the live Coinbase basis for the current position and post-reset fills. Coinbase exchange-native daily realized P&L is shown as a reference only and is not included in clean P&L or return on capital.</div></section>
 </div></details>
 </main></div>
@@ -3870,24 +4015,24 @@ async function sendSnapshot(ev){
   const to = prompt('Email the snapshot to (leave blank to send to the address on file):', '');
   if(to===null) return; // cancelled
   const btn = ev && ev.target; const orig = btn ? btn.innerHTML : '';
-  if(btn){ btn.disabled = true; btn.innerHTML = 'Sending…'; }
+  if(btn){ btn.disabled = true; btn.innerHTML = 'Sending?'; }
   try{
     const r = await fetch('/api/snapshot', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({to: to.trim()})});
     const d = await r.json();
-    alert(d.ok ? ('✅ Snapshot emailed to '+d.sent_to+'\nStatus: '+(d.status||'—')) : ('Snapshot failed: '+(d.error||'unknown')));
+    alert(d.ok ? ('? Snapshot emailed to '+d.sent_to+'\nStatus: '+(d.status||'?')) : ('Snapshot failed: '+(d.error||'unknown')));
   }catch(e){ alert('Snapshot failed: '+e); }
-  finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig || '📸 Snapshot'; } }
+  finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig || '?? Snapshot'; } }
 }
-const $=id=>document.getElementById(id); const num=(n,d=2)=>n==null||isNaN(n)?'—':Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
-function fmtET(ts){ if(!ts) return '—'; try { return new Date(ts).toLocaleString('en-US',{timeZone:'America/New_York',weekday:'short',month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})+' ET'; } catch(e){ return String(ts); } }
-const usd=n=>n==null||isNaN(n)?'—':(Number(n)<0?'-':'')+'$'+num(Math.abs(Number(n)),2); const pct=n=>n==null||isNaN(n)?'—':num(n,2)+'%';
+const $=id=>document.getElementById(id); const num=(n,d=2)=>n==null||isNaN(n)?'?':Number(n).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+function fmtET(ts){ if(!ts) return '?'; try { return new Date(ts).toLocaleString('en-US',{timeZone:'America/New_York',weekday:'short',month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})+' ET'; } catch(e){ return String(ts); } }
+const usd=n=>n==null||isNaN(n)?'?':(Number(n)<0?'-':'')+'$'+num(Math.abs(Number(n)),2); const pct=n=>n==null||isNaN(n)?'?':num(n,2)+'%';
 const cls=n=>Number(n)>0?'good':Number(n)<0?'bad':'muted'; function set(id,v){const e=$(id); if(e)e.textContent=v} function setClass(id,c){const e=$(id); if(e)e.className=c} function pill(id,t,c){const e=$(id); if(e){e.textContent=t;e.className='pill '+c}}
-function warn(items){const e=$('warnBox'); if(!items||!items.length){e.style.display='none';return} e.style.display='block'; e.innerHTML=items.map(x=>'⚠ '+x).join('<br>')}
+function warn(items){const e=$('warnBox'); if(!items||!items.length){e.style.display='none';return} e.style.display='block'; e.innerHTML=items.map(x=>'? '+x).join('<br>')}
 function gauge(label,valueText,pctVal,zoneLeft,zoneWidth,desc,active=false){return `<div class="sig-card ${active?'active':''}"><div class="sig-head"><span class="sig-name">${label}</span><span class="sig-val ${active?'good':''}">${valueText}</span></div><div class="gauge"><div class="zone" style="left:${zoneLeft}%;width:${zoneWidth}%"></div><div class="needle" style="left:${Math.max(0,Math.min(pctVal,100))}%"></div></div><div class="sig-desc">${desc}</div></div>`}
 
 function renderMonitorPips(obj, shortMode=false){
  const entries=Object.entries(obj||{}); if(!entries.length) return '<div class="muted">No components</div>';
- return `<div class="monitor-pips">${entries.map(([k,v])=>`<div class="monitor-pip ${v?'on':''} ${shortMode?'short':''}">${v?'✓':'·'} ${k}</div>`).join('')}</div>`
+ return `<div class="monitor-pips">${entries.map(([k,v])=>`<div class="monitor-pip ${v?'on':''} ${shortMode?'short':''}">${v?'?':'?'} ${k}</div>`).join('')}</div>`
 }
 
 function renderPositionRisk(pr){
@@ -3900,45 +4045,45 @@ function renderPositionRisk(pr){
  <div class="risk-hero">
   <div class="risk-main ${isShort?'short':''} ${tslActive?'tsl-on':''}">
    <div class="risk-side ${side==='LONG'?'good':side==='SHORT'?'bad':'muted'}">${side} ${num(pr.contracts,0)}</div>
-   <div class="risk-contracts">${num(pr.contracts,0)} micro contracts · ${num(Math.abs(pr.btc_exposure||0),4)} BTC notional exposure</div>
+   <div class="risk-contracts">${num(pr.contracts,0)} micro contracts ? ${num(Math.abs(pr.btc_exposure||0),4)} BTC notional exposure</div>
    <div class="risk-stop-card">
-    <div class="risk-stop-head"><span class="stop-badge ${stopClass}">${pr.stop_type||'—'}</span>${pr.manual_monitor_only?'<span class="stop-badge manual">MANUAL · MONITOR ONLY</span>':''}<span class="mini">Source: ${pr.source||'—'}</span></div>
+    <div class="risk-stop-head"><span class="stop-badge ${stopClass}">${pr.stop_type||'?'}</span>${pr.manual_monitor_only?'<span class="stop-badge manual">MANUAL ? MONITOR ONLY</span>':''}<span class="mini">Source: ${pr.source||'?'}</span></div>
     <div class="stop-line"><div class="stop-progress ${tslActive?'active':''}" style="width:${progress}%"></div></div>
-    <div class="risk-status">${pr.status||'—'}</div>
+    <div class="risk-status">${pr.status||'?'}</div>
    </div>
   </div>
   <div class="risk-grid">
    <div class="metric"><div class="label">Entry Price</div><div class="val">${usd(pr.entry_price)}</div><div class="mini">Live Coinbase avg entry</div></div>
    <div class="metric"><div class="label">Current / Mark</div><div class="val">${usd(pr.current_price)}</div><div class="mini">Latest futures mark</div></div>
-   <div class="metric"><div class="label">Unrealized P&L</div><div class="val ${cls(pnl)}">${usd(pnl)}</div><div class="mini">${pnlPct==null?'—':pct(pnlPct)} on price move</div></div>
-   <div class="metric"><div class="label">Notional Value</div><div class="val">${usd(pr.notional)}</div><div class="mini">contracts × 0.01 BTC × mark</div></div>
+   <div class="metric"><div class="label">Unrealized P&L</div><div class="val ${cls(pnl)}">${usd(pnl)}</div><div class="mini">${pnlPct==null?'?':pct(pnlPct)} on price move</div></div>
+   <div class="metric"><div class="label">Notional Value</div><div class="val">${usd(pr.notional)}</div><div class="mini">contracts ? 0.01 BTC ? mark</div></div>
    <div class="metric"><div class="label">ATR Hard Stop</div><div class="val">${usd(pr.atr_stop)}</div><div class="mini">${num(pr.atr_stop_multiplier||1.5,2)}x ATR14</div></div>
-   <div class="metric"><div class="label">TSL Activates At</div><div class="val">${usd(pr.tsl_activation_price)}</div><div class="mini">${pct((pr.tsl_activation_pct||0)*100)} activation ${actGap!=null&&!tslActive?' · gap '+usd(actGap):''}</div></div>
-   <div class="metric"><div class="label">Current Active Stop</div><div class="val ${tslActive?'good':'warn'}">${usd(pr.active_stop)}</div><div class="mini">${tslActive?'Trailing stop':'ATR stop'} ${stopDist!=null?' · cushion '+usd(stopDist):''}</div></div>
-   <div class="metric"><div class="label">TSL Trail / High</div><div class="val">${pct((pr.tsl_trail_pct||0)*100)}</div><div class="mini">High ${pr.highest_price?usd(pr.highest_price):'—'}${pr.lowest_price?' · Low '+usd(pr.lowest_price):''}</div></div>
+   <div class="metric"><div class="label">TSL Activates At</div><div class="val">${usd(pr.tsl_activation_price)}</div><div class="mini">${pct((pr.tsl_activation_pct||0)*100)} activation ${actGap!=null&&!tslActive?' ? gap '+usd(actGap):''}</div></div>
+   <div class="metric"><div class="label">Current Active Stop</div><div class="val ${tslActive?'good':'warn'}">${usd(pr.active_stop)}</div><div class="mini">${tslActive?'Trailing stop':'ATR stop'} ${stopDist!=null?' ? cushion '+usd(stopDist):''}</div></div>
+   <div class="metric"><div class="label">TSL Trail / High</div><div class="val">${pct((pr.tsl_trail_pct||0)*100)}</div><div class="mini">High ${pr.highest_price?usd(pr.highest_price):'?'}${pr.lowest_price?' ? Low '+usd(pr.lowest_price):''}</div></div>
   </div>
  </div>`;
 }
 
 function renderPerpMonitor(pm, d){
- if(!pm||pm.error){set('perpNetPos','—');set('phantomState','Unavailable');set('phantomDetail',pm&&pm.error?pm.error:'—');return}
+ if(!pm||pm.error){set('perpNetPos','?');set('phantomState','Unavailable');set('phantomDetail',pm&&pm.error?pm.error:'?');return}
  const signed=Number(pm.signed_now||0); const side=signed>0?'LONG':signed<0?'SHORT':'FLAT';
  set('perpNetPos',`${side} ${Math.abs(signed)}`); setClass('perpNetPos','val '+(signed>0?'good':signed<0?'bad':'muted'));
  set('perpNetBtc',`${num(Math.abs(signed)*(pm.contract_size_btc||0.01),4)} BTC exposure`);
- const ph=pm.phantom_state||'—'; set('phantomState',ph); const phCls=(ph==='OK'?'good':ph==='PHANTOM RISK'?'bad':String(ph).includes('MANUAL')||String(ph).includes('EXCHANGE-ONLY')?'blue':'warn'); setClass('phantomState','val '+phCls); set('phantomDetail',(pm.phantom_detail||'—')+(pm.phantom_state&&String(pm.phantom_state).includes('MANUAL')?' · Manual positions are monitor-only and do not block the trading gate.':''));
- set('perpLongScore',`${pm.long_score||0}/4`); $('perpLongPips').innerHTML=renderMonitorPips(pm.long_components,false); set('perpLongNote',`Raw monitor only · ${pm.long_triggered?'raw trigger active':'raw trigger not active'} · final score shown to the right`);
- set('perpShortScore',`${pm.short_score||0}/4`); $('perpShortPips').innerHTML=renderMonitorPips(pm.short_components,true); set('perpShortNote',`Raw monitor only · ${pm.net_effect||'—'}`); set('perpNettingNote',`Raw monitor may differ from final tradable score. ${pm.target_short_effect||''} ${pm.note||''}`);
+ const ph=pm.phantom_state||'?'; set('phantomState',ph); const phCls=(ph==='OK'?'good':ph==='PHANTOM RISK'?'bad':String(ph).includes('MANUAL')||String(ph).includes('EXCHANGE-ONLY')?'blue':'warn'); setClass('phantomState','val '+phCls); set('phantomDetail',(pm.phantom_detail||'?')+(pm.phantom_state&&String(pm.phantom_state).includes('MANUAL')?' ? Manual positions are monitor-only and do not block the trading gate.':''));
+ set('perpLongScore',`${pm.long_score||0}/4`); $('perpLongPips').innerHTML=renderMonitorPips(pm.long_components,false); set('perpLongNote',`Raw monitor only ? ${pm.long_triggered?'raw trigger active':'raw trigger not active'} ? final score shown to the right`);
+ set('perpShortScore',`${pm.short_score||0}/4`); $('perpShortPips').innerHTML=renderMonitorPips(pm.short_components,true); set('perpShortNote',`Raw monitor only ? ${pm.net_effect||'?'}`); set('perpNettingNote',`Raw monitor may differ from final tradable score. ${pm.target_short_effect||''} ${pm.note||''}`);
 }
 
 
 function renderIAF(iaf){
  if(!iaf){return}
- set('iafFramework',iaf.framework||'—');
- set('iafFundingGate',iaf.funding_gate_status||'—'); setClass('iafFundingGate','val '+((iaf.funding_gate_status||'')==='OPEN'?'good':'bad'));
- set('iafFundingDetail',`rate ${iaf.funding_rate ?? '—'} · time ${iaf.funding_time || '—'}`);
- set('iafPhantom',iaf.phantom_delay_status||'—'); setClass('iafPhantom','val '+((iaf.phantom_delay_status||'')==='Not published'?'warn':'blue'));
- set('iafPhantomDetail',iaf.phantom_delay_detail||'—');
- set('iafSafeRule',iaf.safe_execution_rule||'—');
+ set('iafFramework',iaf.framework||'?');
+ set('iafFundingGate',iaf.funding_gate_status||'?'); setClass('iafFundingGate','val '+((iaf.funding_gate_status||'')==='OPEN'?'good':'bad'));
+ set('iafFundingDetail',`rate ${iaf.funding_rate ?? '?'} ? time ${iaf.funding_time || '?'}`);
+ set('iafPhantom',iaf.phantom_delay_status||'?'); setClass('iafPhantom','val '+((iaf.phantom_delay_status||'')==='Not published'?'warn':'blue'));
+ set('iafPhantomDetail',iaf.phantom_delay_detail||'?');
+ set('iafSafeRule',iaf.safe_execution_rule||'?');
  const rules=iaf.rule_notes||[];
  $('iafRules').innerHTML=rules.map(r=>{
    const st=(r.status||'').toLowerCase();
@@ -3949,35 +4094,35 @@ function renderIAF(iaf){
 function renderPortfolio(po){
  if(!po){return}
  set('portNetDelta',`${num(po.net_btc_delta,4)} BTC`); setClass('portNetDelta','val '+cls(po.net_btc_delta));
- set('portNotional',usd(po.gross_perp_notional)); set('portLeverage',po.effective_leverage==null?'—':`${num(po.effective_leverage,2)}x futures equity leverage`);
- set('portDeltaMini',`${Math.abs(po.abs_contracts||0)} micro contracts × ${num(po.contract_size_btc||0.01,4)} BTC`);
- set('portSpotBtc',`${num(po.spot_btc,8)} BTC`); set('portPerpBtc',`${po.exchange_side||'FLAT'} ${Math.abs(po.abs_contracts||0)} micro contracts / ${num(po.perp_btc,4)} BTC notional`); set('portExchange',`${po.exchange_side||'—'} ${Math.abs(po.net_contracts||0)} contracts @ avg ${po.exchange_avg_entry?usd(po.exchange_avg_entry):'—'}`); set('portSummary',po.summary||'—');
+ set('portNotional',usd(po.gross_perp_notional)); set('portLeverage',po.effective_leverage==null?'?':`${num(po.effective_leverage,2)}x futures equity leverage`);
+ set('portDeltaMini',`${Math.abs(po.abs_contracts||0)} micro contracts ? ${num(po.contract_size_btc||0.01,4)} BTC`);
+ set('portSpotBtc',`${num(po.spot_btc,8)} BTC`); set('portPerpBtc',`${po.exchange_side||'FLAT'} ${Math.abs(po.abs_contracts||0)} micro contracts / ${num(po.perp_btc,4)} BTC notional`); set('portExchange',`${po.exchange_side||'?'} ${Math.abs(po.net_contracts||0)} contracts @ avg ${po.exchange_avg_entry?usd(po.exchange_avg_entry):'?'}`); set('portSummary',po.summary||'?');
 }
 function renderReconciler(rec){
  if(!rec){return}
- const status=rec.status||'—'; set('recStatus',status); setClass('recStatus','val '+(status==='OK'?'good':status.includes('PHANTOM')?'bad':'warn'));
- set('recDetail',rec.detail||'—'); set('recOpening',`Target ${rec.target_signed==null?'—':rec.target_signed} / Drift ${rec.exposure_drift==null?'—':rec.exposure_drift}`);
- set('recExchange',`${rec.exchange_side||'—'} ${rec.exchange_contracts||0}`); set('recBotLegs',rec.local_bot_legs||0); set('recSigned',rec.signed_now||0); set('recSafeRule',rec.safe_rule||'—');
+ const status=rec.status||'?'; set('recStatus',status); setClass('recStatus','val '+(status==='OK'?'good':status.includes('PHANTOM')?'bad':'warn'));
+ set('recDetail',rec.detail||'?'); set('recOpening',`Target ${rec.target_signed==null?'?':rec.target_signed} / Drift ${rec.exposure_drift==null?'?':rec.exposure_drift}`);
+ set('recExchange',`${rec.exchange_side||'?'} ${rec.exchange_contracts||0}`); set('recBotLegs',rec.local_bot_legs||0); set('recSigned',rec.signed_now||0); set('recSafeRule',rec.safe_rule||'?');
 }
 
-function renderSignals(sig){if(!sig||sig.error){$('signalCards').innerHTML='<div class="muted">Signal data unavailable</div>';set('scoreText',sig&&sig.error?sig.error:'—');return} const score=Number(sig.score||0); [...$('scorePips').children].forEach((p,i)=>p.className='score-pip '+(i<score?'on':'')); set('scoreText',`Score ${score}/4 · ${sig.granularity||''}`); const rsiL=Number(sig.rsi_floor||20), rsiT=Number(sig.rsi_threshold||28); $('signalCards').innerHTML=[
- gauge('RSI',num(sig.rsi,2),sig.rsi_pct||0,rsiL,Math.max(1,rsiT-rsiL),`<span>Buy band ${num(rsiL,0)}–${num(rsiT,0)}</span><span class="${sig.sig_rsi?'good':'muted'}">${sig.sig_rsi?'✓ ACTIVE':'not active'}</span>`,!!sig.sig_rsi),
- gauge('Bollinger Band',`$${num(sig.price,2)}`,sig.bb_pct||0,0,8,`<span>Lower band $${num(sig.bb_lower,2)}</span><span class="${sig.sig_bb?'good':'muted'}">${sig.sig_bb?'✓ ACTIVE':'above lower'}</span>`,!!sig.sig_bb),
- gauge('Volume Spike',num(sig.vol_ratio,2)+'x',sig.vol_pct||0,50,50,`<span>Trigger ≥ ${num(sig.vol_threshold,2)}x</span><span class="${sig.sig_vol?'good':'muted'}">${sig.sig_vol?'✓ ACTIVE':'not active'}</span>`,!!sig.sig_vol),
- gauge('StochRSI',num(sig.stoch,3),(sig.stoch_pct||0),0,(Number(sig.stoch_threshold||.1)*100),`<span>Trigger ≤ ${num(sig.stoch_threshold,2)}</span><span class="${sig.sig_stoch?'good':'muted'}">${sig.sig_stoch?'✓ ACTIVE':'not active'}</span>`,!!sig.sig_stoch)
+function renderSignals(sig){if(!sig||sig.error){$('signalCards').innerHTML='<div class="muted">Signal data unavailable</div>';set('scoreText',sig&&sig.error?sig.error:'?');return} const score=Number(sig.score||0); [...$('scorePips').children].forEach((p,i)=>p.className='score-pip '+(i<score?'on':'')); set('scoreText',`Score ${score}/4 ? ${sig.granularity||''}`); const rsiL=Number(sig.rsi_floor||20), rsiT=Number(sig.rsi_threshold||28); $('signalCards').innerHTML=[
+ gauge('RSI',num(sig.rsi,2),sig.rsi_pct||0,rsiL,Math.max(1,rsiT-rsiL),`<span>Buy band ${num(rsiL,0)}?${num(rsiT,0)}</span><span class="${sig.sig_rsi?'good':'muted'}">${sig.sig_rsi?'? ACTIVE':'not active'}</span>`,!!sig.sig_rsi),
+ gauge('Bollinger Band',`$${num(sig.price,2)}`,sig.bb_pct||0,0,8,`<span>Lower band $${num(sig.bb_lower,2)}</span><span class="${sig.sig_bb?'good':'muted'}">${sig.sig_bb?'? ACTIVE':'above lower'}</span>`,!!sig.sig_bb),
+ gauge('Volume Spike',num(sig.vol_ratio,2)+'x',sig.vol_pct||0,50,50,`<span>Trigger ? ${num(sig.vol_threshold,2)}x</span><span class="${sig.sig_vol?'good':'muted'}">${sig.sig_vol?'? ACTIVE':'not active'}</span>`,!!sig.sig_vol),
+ gauge('StochRSI',num(sig.stoch,3),(sig.stoch_pct||0),0,(Number(sig.stoch_threshold||.1)*100),`<span>Trigger ? ${num(sig.stoch_threshold,2)}</span><span class="${sig.sig_stoch?'good':'muted'}">${sig.sig_stoch?'? ACTIVE':'not active'}</span>`,!!sig.sig_stoch)
  ].join('')}
-function renderHistory(h){$('sigHistory').innerHTML=(h||[]).slice().reverse().map(x=>`<div class="hist-row"><span class="hist-ts">${x.ts||''}</span><span class="hist-score s${x.score||0}">${x.score??'—'}</span><span><span class="sig-pip ${x.sig_rsi?'sp-on':'sp-off'}">R</span><span class="sig-pip ${x.sig_bb?'sp-on':'sp-off'}">B</span><span class="sig-pip ${x.sig_vol?'sp-on':'sp-off'}">V</span><span class="sig-pip ${x.sig_stoch?'sp-on':'sp-off'}">S</span></span><span class="mini">$${num(x.price,0)}</span></div>`).join('')||'<div class="muted">No signal history yet</div>'}
+function renderHistory(h){$('sigHistory').innerHTML=(h||[]).slice().reverse().map(x=>`<div class="hist-row"><span class="hist-ts">${x.ts||''}</span><span class="hist-score s${x.score||0}">${x.score??'?'}</span><span><span class="sig-pip ${x.sig_rsi?'sp-on':'sp-off'}">R</span><span class="sig-pip ${x.sig_bb?'sp-on':'sp-off'}">B</span><span class="sig-pip ${x.sig_vol?'sp-on':'sp-off'}">V</span><span class="sig-pip ${x.sig_stoch?'sp-on':'sp-off'}">S</span></span><span class="mini">$${num(x.price,0)}</span></div>`).join('')||'<div class="muted">No signal history yet</div>'}
 function renderLadder(id,max,onCount,manualContracts){let html=''; for(let i=1;i<=max;i++){const on=i<=onCount; html+=`<div class="slot ${on?'on':''}"><div class="num">${i}</div><div class="lbl">${on?'Active':'Available'}</div></div>`} if(manualContracts>0){html+=`<div class="slot manual"><div class="num">${manualContracts}</div><div class="lbl">Exchange contracts</div></div>`} $(id).innerHTML=html}
 
-function yn(v){return v===true?'YES':v===false?'NO':'—'}
+function yn(v){return v===true?'YES':v===false?'NO':'?'}
 function ynClass(v){return 'val check '+(v===true?'yes':v===false?'no':'')}
 function renderMacro(mac, gate){
  const known=mac&&mac.regime&&mac.regime!=='UNKNOWN'; const macroOpen=mac&&mac.gate_open===true;
  const riskOpen = !gate || gate.entries_allowed === true;
  const clsName = gate ? (gate.color||'unknown') : (!known?'unknown':macroOpen?'enabled':'blocked');
- const txt = gate ? (gate.headline||'Trading Gate') : (!known?'UNKNOWN':macroOpen?'🟢 Trading Enabled':'🔴 Trading Blocked');
- const reason = gate ? `${gate.reason||'—'} · ${gate.manual_management_text||''}` : (macroOpen?'Spot entries and Perp bridge are allowed by macro gate.':(mac.blocked_reason||'Macro gate status unknown'));
- const e=$('tradeStatus'); if(e){e.className='status-banner '+clsName; e.innerHTML=`<span>${txt}</span><strong>${gate ? (gate.label||'—') : (mac.gate_text||'—')}</strong>`}
+ const txt = gate ? (gate.headline||'Trading Gate') : (!known?'UNKNOWN':macroOpen?'?? Trading Enabled':'?? Trading Blocked');
+ const reason = gate ? `${gate.reason||'?'} ? ${gate.manual_management_text||''}` : (macroOpen?'Spot entries and Perp bridge are allowed by macro gate.':(mac.blocked_reason||'Macro gate status unknown'));
+ const e=$('tradeStatus'); if(e){e.className='status-banner '+clsName; e.innerHTML=`<span>${txt}</span><strong>${gate ? (gate.label||'?') : (mac.gate_text||'?')}</strong>`}
  set('macroRegime',mac.regime||'UNKNOWN'); setClass('macroRegime','macro-state '+(macroOpen?'good':known?'bad':'warn'));
  set('macroReason',reason);
  set('macroPrice',usd(mac.price)); set('macroFast',usd(mac.sma_fast)); set('macroSlow',usd(mac.sma_slow)); set('macroFastPeriod',mac.fast_period?'('+mac.fast_period+')':''); set('macroSlowPeriod',mac.slow_period?'('+mac.slow_period+')':'');
@@ -4004,9 +4149,9 @@ function updateSizingPreview(cfg){
  else { probe=1; partial=1; strong=1; }
  const rungs=[...new Set([0,1,probe,partial,strong,max])].sort((a,b)=>a-b);
  const step=(v)=>{ const lower=rungs.filter(x=>x<v); return lower.length?Math.max(...lower):0; };
- const tpLine=`${max}→${step(max)} · ${strong}→${step(strong)} · ${partial}→${step(partial)} · ${probe}→${step(probe)} · 1→0`;
+ const tpLine=`${max}?${step(max)} ? ${strong}?${step(strong)} ? ${partial}?${step(partial)} ? ${probe}?${step(probe)} ? 1?0`;
  const el=document.getElementById('sizingPreview');
- if(el){ el.innerHTML = `Sizing ladder from Max <b>${max}</b>: Probe <b>${probe}</b> (${probePct.toFixed(0)}%) → Partial <b>${partial}</b> (${partialPct.toFixed(0)}%) → Strong <b>${strong}</b> (${strongPct.toFixed(0)}%) → Full <b>${max}</b>. Max adds/position: <b>${adds}</b>.<br><span class="mini">TP step-down ladder: ${tpLine}. Whole contracts only; probe keeps a 1-contract runner.</span>`; }
+ if(el){ el.innerHTML = `Sizing ladder from Max <b>${max}</b>: Probe <b>${probe}</b> (${probePct.toFixed(0)}%) ? Partial <b>${partial}</b> (${partialPct.toFixed(0)}%) ? Strong <b>${strong}</b> (${strongPct.toFixed(0)}%) ? Full <b>${max}</b>. Max adds/position: <b>${adds}</b>.<br><span class="mini">TP step-down ladder: ${tpLine}. Whole contracts only; probe keeps a 1-contract runner.</span>`; }
 }
 
 function setControlValues(cfg){
@@ -4039,7 +4184,7 @@ function setControlValues(cfg){
 
 
 function cooldownLine(cd){
- if(!cd) return '—';
+ if(!cd) return '?';
  const active = cd.active===true;
  const rem = cd.remaining_seconds || 0;
  return active ? `cooling ${rem}s` : 'ready';
@@ -4090,11 +4235,11 @@ function toggleTriggerZoom(){
 }
 function triggerChip(layer,label,cls=''){
  const st=window.TRIGGER_MAP_SETTINGS||{layers:{}}; const on=(st.layers||{})[layer]!==false;
- return `<button class="trigger-chip ${cls} ${on?'on':''}" onclick="setTriggerLayer('${layer}')">${on?'✓':'·'} ${label}</button>`;
+ return `<button class="trigger-chip ${cls} ${on?'on':''}" onclick="setTriggerLayer('${layer}')">${on?'?':'?'} ${label}</button>`;
 }
 function triggerZoomChip(){
  const st=window.TRIGGER_MAP_SETTINGS||{};
- return `<button class="trigger-chip ${st.zoom?'on':''}" onclick="toggleTriggerZoom()">${st.zoom?'✓ Near Price ±3%':'Full Map'}</button>`;
+ return `<button class="trigger-chip ${st.zoom?'on':''}" onclick="toggleTriggerZoom()">${st.zoom?'? Near Price ?3%':'Full Map'}</button>`;
 }
 function triggerLevelObj(label, level, type, note, lane, priority){
  return {label, level:Number(level), type:type||'', note:note||'', lane:lane||'right', priority:priority||50};
@@ -4129,11 +4274,11 @@ function clusterMarker(cluster, minL, maxL, price){
  const avgLevel=cluster.anchor;
  const dist=triggerDistancePct(avgLevel,price);
  if(count===1){
-   const note = primary.note ? ` · ${primary.note}` : '';
-   const distTxt = primary.type==='current' ? '' : ` · ${dist==null?'—':(dist>0?'+':'')+num(dist,2)+'%'}`;
+   const note = primary.note ? ` ? ${primary.note}` : '';
+   const distTxt = primary.type==='current' ? '' : ` ? ${dist==null?'?':(dist>0?'+':'')+num(dist,2)+'%'}`;
    return `<div class="trigger-marker ${type} lane-${lane}" style="top:${top}%"><div class="level">${usd(primary.level)}</div><div class="line"><span class="tag">${primary.label}${note}${distTxt}</span></div></div>`;
  }
- const names=items.slice(0,4).map(x=>x.label).join(' · ')+(items.length>4?' · …':'');
+ const names=items.slice(0,4).map(x=>x.label).join(' ? ')+(items.length>4?' ? ?':'');
  const notes=items.map(x=>`${x.label}${x.note?' ('+x.note+')':''}`).slice(0,5).join('<br>');
  return `<div class="trigger-marker cluster ${type} lane-${lane}" style="top:${top}%"><div class="level">${usd(avgLevel)}</div><div class="line"><span class="tag"><span class="cluster-count">${count}</span><span class="cluster-title">${names}</span><div class="cluster-items">${notes}<br>${dist==null?'':'Distance: '+(dist>0?'+':'')+num(dist,2)+'%'}</div></span></div></div>`;
 }
@@ -4141,7 +4286,7 @@ function nearestTriggers(items, price){
  const valid=(items||[]).filter(x=>x&&isFinite(x.level)&&x.level>0&&x.type!=='current');
  const above=valid.filter(x=>x.level>price).sort((a,b)=>a.level-b.level)[0];
  const below=valid.filter(x=>x.level<price).sort((a,b)=>b.level-a.level)[0];
- const card=(x,title)=>x?`<div class="nearest-card"><div class="label">${title}</div><div class="val ${x.type==='sell'?'bad':x.type==='buy'?'good':x.type==='manual'?'purple':'warn'}">${x.label}</div><div class="note">${usd(x.level)} · ${(triggerDistancePct(x.level,price)>0?'+':'')+num(triggerDistancePct(x.level,price),2)}% ${x.note?`· ${x.note}`:''}</div></div>`:`<div class="nearest-card"><div class="label">${title}</div><div class="val muted">None nearby</div><div class="note">No level in this direction inside the current map range.</div></div>`;
+ const card=(x,title)=>x?`<div class="nearest-card"><div class="label">${title}</div><div class="val ${x.type==='sell'?'bad':x.type==='buy'?'good':x.type==='manual'?'purple':'warn'}">${x.label}</div><div class="note">${usd(x.level)} ? ${(triggerDistancePct(x.level,price)>0?'+':'')+num(triggerDistancePct(x.level,price),2)}% ${x.note?`? ${x.note}`:''}</div></div>`:`<div class="nearest-card"><div class="label">${title}</div><div class="val muted">None nearby</div><div class="note">No level in this direction inside the current map range.</div></div>`;
  return `<div class="trigger-nearest">${card(above,'Nearest upside trigger')}${card(below,'Nearest downside trigger')}</div>`;
 }
 function renderBTCTriggerMap(d){
@@ -4185,9 +4330,9 @@ function renderBTCTriggerMap(d){
  minL=Math.min(...rawLevels); maxL=Math.max(...rawLevels); const pad2=Math.max(180,(maxL-minL)*0.22); minL-=pad2; maxL+=pad2;
  const clusters=clusterTriggerLevels(visibleLevels,price);
  const markers=clusters.map(c=>clusterMarker(c,minL,maxL,price)).join('');
- const laneSummary=(layer,title,klass)=>{const arr=visibleLevels.filter(x=>triggerLayerFor(x)===layer&&x.type!=='current'); const nearest=arr.sort((a,b)=>Math.abs(a.level-price)-Math.abs(b.level-price))[0]; return `<div class="trigger-lane-card"><div class="label">${title}</div><div class="val ${klass}">${nearest?nearest.label:'Hidden / none'}</div><div class="note">${nearest?usd(nearest.level)+' · '+((triggerDistancePct(nearest.level,price)>0?'+':'')+num(triggerDistancePct(nearest.level,price),2)+'%'):'Use layer toggles to show more levels.'}</div></div>`};
+ const laneSummary=(layer,title,klass)=>{const arr=visibleLevels.filter(x=>triggerLayerFor(x)===layer&&x.type!=='current'); const nearest=arr.sort((a,b)=>Math.abs(a.level-price)-Math.abs(b.level-price))[0]; return `<div class="trigger-lane-card"><div class="label">${title}</div><div class="val ${klass}">${nearest?nearest.label:'Hidden / none'}</div><div class="note">${nearest?usd(nearest.level)+' ? '+((triggerDistancePct(nearest.level,price)>0?'+':'')+num(triggerDistancePct(nearest.level,price),2)+'%'):'Use layer toggles to show more levels.'}</div></div>`};
  const controls=`<div class="trigger-control-grid">${triggerZoomChip()}${triggerChip('buy','Buy / Long','buy')}${triggerChip('sell','Sell / Short','sell')}${triggerChip('risk','Stops / TP / TSL','risk')}${triggerChip('manual','Manual','manual')}${triggerChip('macro','SMA / Macro','')}</div>`;
- box.innerHTML=`<div class="trigger-map-wrap"><div class="trigger-hero"><div class="mini">BTC live price</div><div class="trigger-price">${usd(price)}</div><div class="trigger-next ${nextClass}">${next}</div>${nearestTriggers(visibleLevels,price)}${controls}<div class="trigger-mode-card"><div class="mini">Interactive view</div><div class="trigger-lanes">${laneSummary('buy','Next Buy / Long','good')}${laneSummary('sell','Next Sell / Short','bad')}${laneSummary('risk','Next Risk / Exit','warn')}${laneSummary('manual','Manual Reference','purple')}</div></div><div class="trigger-legend"><span class="legend-pill">🟢 Buy / Long</span><span class="legend-pill">🔴 Sell / Short</span><span class="legend-pill">🟠 Risk / TP / TSL</span><span class="legend-pill">🟣 Manual</span><span class="legend-pill">🔵 Current Price</span></div><div class="trigger-table"><div class="trigger-tile"><div class="label">Visible / Total Levels</div><div class="val good">${visibleLevels.length} / ${levels.length}</div><div class="note">Use toggles to simplify crowded areas. Near-price mode hides distant signal clutter.</div></div><div class="trigger-tile"><div class="label">Overlap handling</div><div class="val good">${clusters.filter(c=>(c.items||[]).length>1).length} clusters</div><div class="note">Nearby levels are grouped into bubbles with priority labels and exact details.</div></div><div class="trigger-tile"><div class="label">Spot BUY trigger view</div><div class="val ${longScore>=3?'good':'muted'}">Score ${longScore}/4</div><div class="note">Uses RSI, lower BB, volume spike and StochRSI. Macro gate: ${macroOpen?'open':'filtered'}.</div></div><div class="trigger-tile"><div class="label">Risk exits</div><div class="val ${pr.tsl_active?'good':'warn'}">${pr.tsl_active?'TSL active':'ATR / TP1 armed'}</div><div class="note">TP1 ${pc.tp1_done?'done':'pending'} · ATR locked ${pc.atr_at_entry?usd(pc.atr_at_entry):'—'}.</div></div></div></div><div class="trigger-map"><div class="trigger-axis"></div>${markers}</div></div>`;
+ box.innerHTML=`<div class="trigger-map-wrap"><div class="trigger-hero"><div class="mini">BTC live price</div><div class="trigger-price">${usd(price)}</div><div class="trigger-next ${nextClass}">${next}</div>${nearestTriggers(visibleLevels,price)}${controls}<div class="trigger-mode-card"><div class="mini">Interactive view</div><div class="trigger-lanes">${laneSummary('buy','Next Buy / Long','good')}${laneSummary('sell','Next Sell / Short','bad')}${laneSummary('risk','Next Risk / Exit','warn')}${laneSummary('manual','Manual Reference','purple')}</div></div><div class="trigger-legend"><span class="legend-pill">?? Buy / Long</span><span class="legend-pill">?? Sell / Short</span><span class="legend-pill">?? Risk / TP / TSL</span><span class="legend-pill">?? Manual</span><span class="legend-pill">?? Current Price</span></div><div class="trigger-table"><div class="trigger-tile"><div class="label">Visible / Total Levels</div><div class="val good">${visibleLevels.length} / ${levels.length}</div><div class="note">Use toggles to simplify crowded areas. Near-price mode hides distant signal clutter.</div></div><div class="trigger-tile"><div class="label">Overlap handling</div><div class="val good">${clusters.filter(c=>(c.items||[]).length>1).length} clusters</div><div class="note">Nearby levels are grouped into bubbles with priority labels and exact details.</div></div><div class="trigger-tile"><div class="label">Spot BUY trigger view</div><div class="val ${longScore>=3?'good':'muted'}">Score ${longScore}/4</div><div class="note">Uses RSI, lower BB, volume spike and StochRSI. Macro gate: ${macroOpen?'open':'filtered'}.</div></div><div class="trigger-tile"><div class="label">Risk exits</div><div class="val ${pr.tsl_active?'good':'warn'}">${pr.tsl_active?'TSL active':'ATR / TP1 armed'}</div><div class="note">TP1 ${pc.tp1_done?'done':'pending'} ? ATR locked ${pc.atr_at_entry?usd(pc.atr_at_entry):'?'}.</div></div></div></div><div class="trigger-map"><div class="trigger-axis"></div>${markers}</div></div>`;
 }
 
 function renderRiskIntelligence(d){
@@ -4195,47 +4340,47 @@ function renderRiskIntelligence(d){
  const currentBlocked = d.current_blocked_actions || opp.last_blocked_action || {};
  set('intelLarryPnl', usd(l.net_pnl)); setClass('intelLarryPnl','intel-val '+cls(l.net_pnl)); set('intelLarryNote', l.note||'Larry clean strategy P&L excludes manual monitor-only exposure.');
  // v78: the ONE place manual trading is acknowledged. Single footnote, no dual monitoring.
- if(m.active){ set('intelManualBook', `${m.side||'—'} ${num(m.contracts,0)} · ${usd(m.unrealized_pnl)}`); setClass('intelManualBook','intel-val '+cls(m.unrealized_pnl)); set('intelManualNote', `Entry ${usd(m.avg_entry_price)} · Mark ${usd(m.current_price)} · excluded from Larry. Top up to cover any manual losses.`); }
- else { set('intelManualBook','No manual position'); setClass('intelManualBook','intel-val muted'); set('intelManualNote',"Manual trades are excluded from Larry performance. If they lose money, top up funds to keep the account whole — Larry's numbers are unaffected."); }
- set('intelExposure', `${num(rx.net_btc_delta,4)} BTC net`); setClass('intelExposure','intel-val '+cls(rx.net_btc_delta)); set('intelExposureNote', `Spot ${num(rx.spot_btc,4)} BTC · Perp ${num(rx.perp_btc,4)} BTC · Notional ${usd(rx.gross_perp_notional)} · Lev ${rx.effective_leverage==null?'—':num(rx.effective_leverage,2)+'x'}.`);
+ if(m.active){ set('intelManualBook', `${m.side||'?'} ${num(m.contracts,0)} ? ${usd(m.unrealized_pnl)}`); setClass('intelManualBook','intel-val '+cls(m.unrealized_pnl)); set('intelManualNote', `Entry ${usd(m.avg_entry_price)} ? Mark ${usd(m.current_price)} ? excluded from Larry. Top up to cover any manual losses.`); }
+ else { set('intelManualBook','No manual position'); setClass('intelManualBook','intel-val muted'); set('intelManualNote',"Manual trades are excluded from Larry performance. If they lose money, top up funds to keep the account whole ? Larry's numbers are unaffected."); }
+ set('intelExposure', `${num(rx.net_btc_delta,4)} BTC net`); setClass('intelExposure','intel-val '+cls(rx.net_btc_delta)); set('intelExposureNote', `Spot ${num(rx.spot_btc,4)} BTC ? Perp ${num(rx.perp_btc,4)} BTC ? Notional ${usd(rx.gross_perp_notional)} ? Lev ${rx.effective_leverage==null?'?':num(rx.effective_leverage,2)+'x'}.`);
  // v78 bug fix: this tile used ri.execution_quality.sample_count while the dedicated
- // Execution Quality panel uses larry_trade_accounting.execution_quality.sample_trades —
+ // Execution Quality panel uses larry_trade_accounting.execution_quality.sample_trades ?
  // the two disagreed ("Grade A / 143" vs "No samples"). Both now read the ledger source.
  const exq=(d.larry_trade_accounting||{}).execution_quality||{}; const exSamples=Number(exq.sample_trades||ex.sample_count||0); const exAvg=(exq.avg_slippage_bps!=null?exq.avg_slippage_bps:ex.avg_slippage_bps);
- set('intelSlippage', exSamples?`${num(exAvg,2)} bps avg`:'No samples'); setClass('intelSlippage','intel-val '+(exAvg>0?'warn':'good')); set('intelSlippageNote', `Worst ${exq.worst_slippage_bps==null?(ex.worst_slippage_bps==null?'—':num(ex.worst_slippage_bps,2)+' bps'):num(exq.worst_slippage_bps,2)+' bps'} · Samples ${exSamples}.`);
- const blockerCount=Object.keys(currentBlocked).filter(k=>currentBlocked[k]).length; set('intelOppCost', `${blockerCount} current blockers`); setClass('intelOppCost','intel-val '+(blockerCount>0?'warn':'good')); set('intelOppNote', blockerCount?Object.entries(currentBlocked).map(([k,v])=>`${k}: ${v}`).join(' · '):'No current blocked action.');
+ set('intelSlippage', exSamples?`${num(exAvg,2)} bps avg`:'No samples'); setClass('intelSlippage','intel-val '+(exAvg>0?'warn':'good')); set('intelSlippageNote', `Worst ${exq.worst_slippage_bps==null?(ex.worst_slippage_bps==null?'?':num(ex.worst_slippage_bps,2)+' bps'):num(exq.worst_slippage_bps,2)+' bps'} ? Samples ${exSamples}.`);
+ const blockerCount=Object.keys(currentBlocked).filter(k=>currentBlocked[k]).length; set('intelOppCost', `${blockerCount} current blockers`); setClass('intelOppCost','intel-val '+(blockerCount>0?'warn':'good')); set('intelOppNote', blockerCount?Object.entries(currentBlocked).map(([k,v])=>`${k}: ${v}`).join(' ? '):'No current blocked action.');
  set('intelDrawdown', usd(dd.current_strategy_pnl)); setClass('intelDrawdown','intel-val '+cls(dd.current_strategy_pnl)); set('intelDrawdownNote', `Larry strategy P&L since reset. Full drawdown curve pending periodic equity snapshots.`);
- set('intelFundingCost', usd(fu.today_or_session_funding_pnl)); setClass('intelFundingCost','intel-val '+cls(fu.today_or_session_funding_pnl)); set('intelFundingNote', `Rate ${fu.funding_rate==null?'—':Number(fu.funding_rate).toFixed(6)} · Long gate ${fu.long_gate_open===false?'closed':'open/—'} · Short gate ${fu.short_gate_open===false?'closed':'open/—'}.`);
- const hs=h.heartbeat_health||'—'; set('intelHealth', hs); setClass('intelHealth','intel-val '+(hs==='LIVE'?'good':hs==='STALE'?'warn':'bad')); set('intelHealthNote', `Age ${h.heartbeat_age_secs==null?'—':h.heartbeat_age_secs+'s'} · State ${h.bot_state||'—'} · Kill ${h.kill_switch&&h.kill_switch.halt?'HALTED':'clear'} · Updated ${h.last_updated||'—'}.`);
+ set('intelFundingCost', usd(fu.today_or_session_funding_pnl)); setClass('intelFundingCost','intel-val '+cls(fu.today_or_session_funding_pnl)); set('intelFundingNote', `Rate ${fu.funding_rate==null?'?':Number(fu.funding_rate).toFixed(6)} ? Long gate ${fu.long_gate_open===false?'closed':'open/?'} ? Short gate ${fu.short_gate_open===false?'closed':'open/?'}.`);
+ const hs=h.heartbeat_health||'?'; set('intelHealth', hs); setClass('intelHealth','intel-val '+(hs==='LIVE'?'good':hs==='STALE'?'warn':'bad')); set('intelHealthNote', `Age ${h.heartbeat_age_secs==null?'?':h.heartbeat_age_secs+'s'} ? State ${h.bot_state||'?'} ? Kill ${h.kill_switch&&h.kill_switch.halt?'HALTED':'clear'} ? Updated ${h.last_updated||'?'}.`);
  const rows=(ri.signal_attribution&&ri.signal_attribution.rows)||[];
- const roll=$('intelSignalRollup'); if(roll){ if(rows.length){ roll.innerHTML=`<table class="tiny-table"><thead><tr><th>Class</th><th>Trades</th><th>Closed</th><th>P&L</th><th>Win%</th><th>Slip</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${r.signal_class||r.class||'—'}</td><td>${r.trades||0}</td><td>${r.closing_trades||0}</td><td class="${cls(r.gross_realized_usd)}">${usd(r.gross_realized_usd)}</td><td>${r.win_rate||'—'}</td><td>${r.avg_slippage_bps||'—'}</td></tr>`).join('')}</tbody></table>`; } else { roll.innerHTML='No rollup yet. Upload/run <code>analyze_signal_pnl.py --write</code> on the VM to populate signal_pnl_rollup.csv.'; } }
+ const roll=$('intelSignalRollup'); if(roll){ if(rows.length){ roll.innerHTML=`<table class="tiny-table"><thead><tr><th>Class</th><th>Trades</th><th>Closed</th><th>P&L</th><th>Win%</th><th>Slip</th></tr></thead><tbody>${rows.map(r=>`<tr><td>${r.signal_class||r.class||'?'}</td><td>${r.trades||0}</td><td>${r.closing_trades||0}</td><td class="${cls(r.gross_realized_usd)}">${usd(r.gross_realized_usd)}</td><td>${r.win_rate||'?'}</td><td>${r.avg_slippage_bps||'?'}</td></tr>`).join('')}</tbody></table>`; } else { roll.innerHTML='No rollup yet. Upload/run <code>analyze_signal_pnl.py --write</code> on the VM to populate signal_pnl_rollup.csv.'; } }
  const exp=$('intelExpectedActual'); if(exp){ exp.innerHTML=`Actual Larry P&L: <b class="${cls(sva.actual_larry_strategy_pnl)}">${usd(sva.actual_larry_strategy_pnl)}</b><br>Manual P&L: <b class="${cls(sva.actual_manual_pnl)}">${usd(sva.actual_manual_pnl)}</b><br>Combined equity drift: <b class="${cls(sva.actual_combined_equity_drift)}">${usd(sva.actual_combined_equity_drift)}</b><br><span class="muted">${sva.expected_note||''}</span>`; }
 }
 
 function renderSignalLifecycle(d){
  const es=d.engine_state||{}, cfg=d.config||{}, ph=es.phantom||{}, life=es.signal_lifecycle||{};
  const st=life.state||ph.state||'MONITORING';
- const dir=life.direction||ph.direction||'—';
+ const dir=life.direction||ph.direction||'?';
  const exp=life.expires_at||ph.expires_at;
  const armed=life.armed_at||ph.armed_at;
  const lockScore=life.locked_score ?? ph.locked_score;
  const lockConf=life.locked_confidence_pct ?? ph.locked_confidence_pct;
  const lockTarget=life.locked_target_contracts ?? ph.locked_target_contracts;
- const nowMs=Date.now(); let remain='—';
+ const nowMs=Date.now(); let remain='?';
  if(exp){ const ms=new Date(exp).getTime()-nowMs; remain=ms>0?`${Math.ceil(ms/60000)}m left`:'expired'; }
  const clsMap={MONITORING:'muted',PHANTOM_ARMED:'warn',EXTENSION_CONFIRMED:'warn',COMMITTED_ENTRY:'good',FUNDING_BLOCKED:'bad'};
  set('lifeState', st); setClass('lifeState','v12-val '+(clsMap[st]||'warn'));
- set('lifeStateNote', `${dir} · ${ph.reason||life.reason||'Waiting for setup'}`);
- set('lifeLockedSetup', lockScore!=null?`${dir} score ${lockScore}/4 · ${lockConf ?? '—'}%`:'No locked setup'); setClass('lifeLockedSetup','v12-val '+(lockScore!=null?'good':'muted'));
- set('lifeLockedNote', `Locked target ${lockTarget ?? '—'} contracts · armed ${fmtET(armed)} · confirmation ${(ph.confirmation_mode||'next_closed_candle')} · extension achieved ${ph.extension_achieved?'YES':'NO'} · confidence freeze ${cfg.FREEZE_CONFIDENCE_ON_ARM===false?'OFF':'ON'}.`);
+ set('lifeStateNote', `${dir} ? ${ph.reason||life.reason||'Waiting for setup'}`);
+ set('lifeLockedSetup', lockScore!=null?`${dir} score ${lockScore}/4 ? ${lockConf ?? '?'}%`:'No locked setup'); setClass('lifeLockedSetup','v12-val '+(lockScore!=null?'good':'muted'));
+ set('lifeLockedNote', `Locked target ${lockTarget ?? '?'} contracts ? armed ${fmtET(armed)} ? confirmation ${(ph.confirmation_mode||'next_closed_candle')} ? extension achieved ${ph.extension_achieved?'YES':'NO'} ? confidence freeze ${cfg.FREEZE_CONFIDENCE_ON_ARM===false?'OFF':'ON'}.`);
  set('lifeValidity', `${remain}`); setClass('lifeValidity','v12-val '+(remain==='expired'?'bad':exp?'good':'muted'));
  set('lifeValidityNote', `Configured ${cfg.SIGNAL_VALIDITY_MINUTES||20} minutes. Setup expires instead of constantly re-qualifying forever.`);
- set('lifeHysteresis', `Arm ≥${cfg.SIGNAL_HYSTERESIS_ARM_SCORE||3}/4 · cancel ≤${cfg.SIGNAL_CANCEL_SCORE ?? 1}/4`); setClass('lifeHysteresis','v12-val good');
+ set('lifeHysteresis', `Arm ?${cfg.SIGNAL_HYSTERESIS_ARM_SCORE||3}/4 ? cancel ?${cfg.SIGNAL_CANCEL_SCORE ?? 1}/4`); setClass('lifeHysteresis','v12-val good');
  set('lifeHysteresisNote', 'Once armed, minor score wobble is ignored. Only score collapse or expiry cancels the setup.');
  set('lifeCommitRule', cfg.SIGNAL_COMMIT_ON_CLOSED_CANDLE===false?'Tick confirm':'Next closed candle'); setClass('lifeCommitRule','v12-val good');
  set('lifeCommitNote', 'v23: probe entries confirm on the next closed candle. Phantom extension is monitored for sizing/add-ons, not required for entry.');
  const sig=d.signals||{};
- let why=ph.reason||life.reason||''; if(!why){ why=`Long ${sig.long_score??'—'}/4 · Short ${sig.short_score??'—'}/4`; }
+ let why=ph.reason||life.reason||''; if(!why){ why=`Long ${sig.long_score??'?'}/4 ? Short ${sig.short_score??'?'}/4`; }
  set('lifeWhyWaiting', st==='COMMITTED_ENTRY'?'Committed':'Waiting'); setClass('lifeWhyWaiting','v12-val '+(st==='COMMITTED_ENTRY'?'good':'warn'));
  set('lifeWhyNote', why);
 }
@@ -4250,13 +4395,13 @@ function renderV12Transparency(d){
  // which caused the banner to remain after the account was flat.
  const isManual = (mg.is_manual_or_external===true) && Math.abs(liveContracts) > 0;
  const banner=$('v12ManualBanner');
- if(banner){ banner.className='v12-banner '+(isManual?'manual':''); banner.textContent = isManual ? '⚠ Manual / external perp position detected. Larry is MONITOR ONLY and will not ATR-stop, TSL-stop, TP1, add, flip, or flatten this exposure.' : '🟢 No unmanaged manual perp exposure blocking bot-managed execution. Manual mode remains monitor-only by default.'; }
+ if(banner){ banner.className='v12-banner '+(isManual?'manual':''); banner.textContent = isManual ? '? Manual / external perp position detected. Larry is MONITOR ONLY and will not ATR-stop, TSL-stop, TP1, add, flip, or flatten this exposure.' : '?? No unmanaged manual perp exposure blocking bot-managed execution. Manual mode remains monitor-only by default.'; }
  const tp1Done = pc.tp1_done===true;
  const tp1Trig = pc.tp1_trigger_price;
  set('v12Tp1Status', tp1Done ? 'TP1 DONE' : (tp1Trig ? 'TP1 ARMED' : 'WAITING')); setClass('v12Tp1Status','v12-val '+(tp1Done?'good':tp1Trig?'warn':'muted'));
- set('v12Tp1Note', `Trigger ${usd(tp1Trig)} · target ${pc.tp1_target_contracts ?? 'next lower rung'} contracts · active TP ${(Number(pc.tp1_pct_active || cfg.TP1_PCT || 0.0075)*100).toFixed(2)}% · ladder step-down, not a stop.`);
+ set('v12Tp1Note', `Trigger ${usd(tp1Trig)} ? target ${pc.tp1_target_contracts ?? 'next lower rung'} contracts ? active TP ${(Number(pc.tp1_pct_active || cfg.TP1_PCT || 0.0075)*100).toFixed(2)}% ? ladder step-down, not a stop.`);
  set('v12AtrLock', pc.atr_at_entry ? `$${num(pc.atr_at_entry,2)}` : 'Not locked yet'); setClass('v12AtrLock','v12-val '+(pc.atr_at_entry?'good':'warn'));
- set('v12AtrNote', `Entry avg used ${usd(pc.atr_entry_avg)} · ATR stop ${usd(pc.atr_stop)} · multiplier ${num(cfg.ATR_STOP_MULTIPLIER||1.5,2)}x.`);
+ set('v12AtrNote', `Entry avg used ${usd(pc.atr_entry_avg)} ? ATR stop ${usd(pc.atr_stop)} ? multiplier ${num(cfg.ATR_STOP_MULTIPLIER||1.5,2)}x.`);
  const sd = es.last_core_sizing_decision || (es.last_core_target_plan && es.last_core_target_plan.sizing_decision) || {};
  const ladder=(sd&&sd.sizing_ladder)||{}; const mx=cfg.MAX_CONVICTION_CONTRACTS||ladder.full||10;
  let probe=ladder.probe||cfg.CONTRACTS_PER_TRADE_PROBE||Math.max(1,Math.round(mx*(cfg.PROBE_PCT||0.20)));
@@ -4264,18 +4409,18 @@ function renderV12Transparency(d){
  let strong=ladder.strong||Math.max(part,Math.round(mx*(cfg.STRONG_PCT||0.70)));
  if(!ladder.probe && mx>=4){ probe=Math.max(1, Math.min(probe, mx-3)); part=Math.max(probe+1, Math.min(part, mx-2)); strong=Math.max(part+1, Math.min(strong, mx-1)); }
  const rungs=[...new Set([0,1,probe,part,strong,mx])].sort((a,b)=>a-b); const step=(v)=>{const lower=rungs.filter(x=>x<v); return lower.length?Math.max(...lower):0};
- const tpLine=`${mx}→${step(mx)} · ${strong}→${step(strong)} · ${part}→${step(part)} · ${probe}→${step(probe)} · 1→0`;
- const trig=(cfg.TP1_DYNAMIC_BY_LADDER===false)?`Fixed ${(Number(cfg.TP1_PCT||0.0075)*100).toFixed(2)}%`:`Probe/Partial ${(Number(cfg.TP1_PROBE_TRIGGER_PCT||0.0075)*100).toFixed(2)}% · Strong ${(Number(cfg.TP1_STRONG_TRIGGER_PCT||0.006)*100).toFixed(2)}% · Full ${(Number(cfg.TP1_FULL_TRIGGER_PCT||0.005)*100).toFixed(2)}%`;
- set('v12Sizing', `Probe ${probe} · Partial ${part} · Strong ${strong} · Full ${mx}`);
+ const tpLine=`${mx}?${step(mx)} ? ${strong}?${step(strong)} ? ${part}?${step(part)} ? ${probe}?${step(probe)} ? 1?0`;
+ const trig=(cfg.TP1_DYNAMIC_BY_LADDER===false)?`Fixed ${(Number(cfg.TP1_PCT||0.0075)*100).toFixed(2)}%`:`Probe/Partial ${(Number(cfg.TP1_PROBE_TRIGGER_PCT||0.0075)*100).toFixed(2)}% ? Strong ${(Number(cfg.TP1_STRONG_TRIGGER_PCT||0.006)*100).toFixed(2)}% ? Full ${(Number(cfg.TP1_FULL_TRIGGER_PCT||0.005)*100).toFixed(2)}%`;
+ set('v12Sizing', `Probe ${probe} ? Partial ${part} ? Strong ${strong} ? Full ${mx}`);
  const addState = es.add_on_state || {};
- set('v12SizingNote', `Max conviction ${mx} contracts. Tiers derive from Max and round to whole contracts. TP step-down: ${tpLine}. TP triggers: ${trig}. Progressive add-ons ${cfg.PROGRESSIVE_ADD_ONS_ENABLED===false?'OFF':'ON'}: target size rises only when confidence improves. Last sizing: confidence ${sd.confidence_pct ?? '—'}%, target ${sd.target_abs_contracts ?? sd.final_contracts ?? '—'} contracts, reason ${sd.reason || 'waiting'}. Add state: ${addState.adds_count ?? 0}/${cfg.MAX_POSITION_ADDS||3} adds, last confidence ${addState.last_add_confidence_pct ?? 0}%, last target ${addState.last_target_contracts ?? 0}. Macro-blocked probe: ${cfg.SCORE4_MACRO_OVERRIDE_ENABLED?'ON':'OFF'} / ${probe} contracts. Phantom extension target: ${ph.extension_price?usd(ph.extension_price):'—'}; achieved ${ph.extension_achieved?'YES':'NO'}.`);
+ set('v12SizingNote', `Max conviction ${mx} contracts. Tiers derive from Max and round to whole contracts. TP step-down: ${tpLine}. TP triggers: ${trig}. Progressive add-ons ${cfg.PROGRESSIVE_ADD_ONS_ENABLED===false?'OFF':'ON'}: target size rises only when confidence improves. Last sizing: confidence ${sd.confidence_pct ?? '?'}%, target ${sd.target_abs_contracts ?? sd.final_contracts ?? '?'} contracts, reason ${sd.reason || 'waiting'}. Add state: ${addState.adds_count ?? 0}/${cfg.MAX_POSITION_ADDS||3} adds, last confidence ${addState.last_add_confidence_pct ?? 0}%, last target ${addState.last_target_contracts ?? 0}. Macro-blocked probe: ${cfg.SCORE4_MACRO_OVERRIDE_ENABLED?'ON':'OFF'} / ${probe} contracts. Phantom extension target: ${ph.extension_price?usd(ph.extension_price):'?'}; achieved ${ph.extension_achieved?'YES':'NO'}.`);
  const rate = Number((fund&&fund.rate)!=null?fund.rate:0); const lb=fundingBucket('LONG',rate,cfg), sb=fundingBucket('SHORT',rate,cfg);
  set('v12Funding', `L ${lb} / S ${sb}`); setClass('v12Funding','v12-val '+((lb==='BLOCK'||sb==='BLOCK')?'bad':(lb==='PARTIAL'||sb==='PARTIAL')?'warn':'good'));
- set('v12FundingNote', `Rate ${rate?rate.toFixed(6):'—'} · reduce at ±${Number(cfg.FUNDING_SIZE_REDUCE_AT||0.0005).toFixed(4)} · hard gates +${Number(cfg.FUNDING_LONG_MAX||0.001).toFixed(4)} / ${Number(cfg.FUNDING_SHORT_MIN||-0.001).toFixed(4)}.`);
+ set('v12FundingNote', `Rate ${rate?rate.toFixed(6):'?'} ? reduce at ?${Number(cfg.FUNDING_SIZE_REDUCE_AT||0.0005).toFixed(4)} ? hard gates +${Number(cfg.FUNDING_LONG_MAX||0.001).toFixed(4)} / ${Number(cfg.FUNDING_SHORT_MIN||-0.001).toFixed(4)}.`);
  const longCd = cooldownLine(cds.perp_long || cds.perp_last_long_entry_at || cds.long || cds.perp);
  const shortCd = cooldownLine(cds.perp_short || cds.perp_last_short_entry_at || cds.short || cds.perp);
  const bridgeCd = cooldownLine(cds.bridge);
- set('v12Cooldowns', `Long ${longCd} · Short ${shortCd}`);
+ set('v12Cooldowns', `Long ${longCd} ? Short ${shortCd}`);
  set('v12CooldownNote', `Bridge ${bridgeCd}. v12 tracks LONG and SHORT cooldowns separately so one side does not suppress the other.`);
  set('v12ManualMode', manualMode.toUpperCase().replace('_',' ')); setClass('v12ManualMode','v12-val '+(manualMode==='monitor_only'?'good':'warn'));
  set('v12ManualNote', mg.reason || 'Manual/external Coinbase positions are observed and emailed, not managed, unless full_management is explicitly enabled.');
@@ -4287,7 +4432,7 @@ function renderV12Transparency(d){
 }
 async function loadSignalPnlRollup(){
  const box=$('signalPnlRollupBox'); if(!box) return;
- box.textContent='Loading signal P&L rollup…';
+ box.textContent='Loading signal P&L rollup?';
  try{
   const r=await fetch('/api/signal_pnl_rollup?ts='+Date.now(),{cache:'no-store'}); const d=await r.json();
   if(!d.ok){ box.textContent='Rollup unavailable: '+(d.error||'unknown'); return; }
@@ -4318,8 +4463,8 @@ async function loadSignalPnlRollup(){
 }
 
 
-function boolIcon(v){return v?'✅':'☐'}
-function condList(obj){obj=obj||{}; return Object.keys(obj).map(k=>`${boolIcon(obj[k])} ${k.replaceAll('_',' ')}`).join(' · ') || '—'}
+function boolIcon(v){return v?'?':'?'}
+function condList(obj){obj=obj||{}; return Object.keys(obj).map(k=>`${boolIcon(obj[k])} ${k.replaceAll('_',' ')}`).join(' ? ') || '?'}
 
 
 let __tradeMapRange='1M';
@@ -4327,7 +4472,7 @@ let __tradeMapMarkers=[];
 function parseTimeMs(x){ if(!x) return null; const t=Date.parse(x); return Number.isFinite(t)?t:null; }
 function shortTimeLabel(ms, range){ const dt=new Date(ms); const opts=(range==='1D'||range==='1W')?{month:'short',day:'numeric',hour:'numeric'}:{month:'short',day:'numeric'}; return dt.toLocaleString('en-US',opts); }
 function tradeMapCutoff(range){ const now=Date.now(); if(range==='1D') return now-24*3600*1000; if(range==='1W') return now-7*24*3600*1000; if(range==='1M') return now-31*24*3600*1000; if(range==='YTD') return new Date(new Date().getFullYear(),0,1).getTime(); if(range==='12M') return now-365*24*3600*1000; return 0; }
-function tradeKind(r){ const reason=String(r.reason||'').toUpperCase(); const action=String(r.action||'').toUpperCase(); const net=Number(r.net_realized_pnl_usd||0); if(action==='BUY') return {kind:'buy',label: reason.includes('ADD')?'ADD':'BUY',emoji:'🟢'}; if(reason.includes('TP')) return {kind:'tp',label:'TP',emoji:'🟡'}; if(reason.includes('STOP')||reason.includes('ATR')||reason.includes('TSL')||reason.includes('FLATTEN')) return {kind:'stop',label: reason.includes('ATR')?'ATR':reason.includes('TSL')?'TSL':'EXIT',emoji:'🔴'}; if(action==='SELL') return {kind: net>=0?'tp':'stop',label:'SELL',emoji: net>=0?'🟡':'🔴'}; return {kind:'other',label:action||'TRADE',emoji:'⚪'}; }
+function tradeKind(r){ const reason=String(r.reason||'').toUpperCase(); const action=String(r.action||'').toUpperCase(); const net=Number(r.net_realized_pnl_usd||0); if(action==='BUY') return {kind:'buy',label: reason.includes('ADD')?'ADD':'BUY',emoji:'??'}; if(reason.includes('TP')) return {kind:'tp',label:'TP',emoji:'??'}; if(reason.includes('STOP')||reason.includes('ATR')||reason.includes('TSL')||reason.includes('FLATTEN')) return {kind:'stop',label: reason.includes('ATR')?'ATR':reason.includes('TSL')?'TSL':'EXIT',emoji:'??'}; if(action==='SELL') return {kind: net>=0?'tp':'stop',label:'SELL',emoji: net>=0?'??':'??'}; return {kind:'other',label:action||'TRADE',emoji:'?'}; }
 function selectTradeMapPrices(d, range){ const tm=d.trade_map||{}; const hist=(range==='1D'||range==='1W')?(tm.hourly||[]):(tm.daily||tm.hourly||[]); const cutoff=tradeMapCutoff(range); return (hist||[]).map(p=>({t:parseTimeMs(p.timestamp), price:Number(p.price||0), label:p.timestamp_et||fmtET(p.timestamp)})).filter(p=>p.t && p.price && p.t>=cutoff).sort((a,b)=>a.t-b.t); }
 function selectTradeMapTrades(d, range){ const rows=((d.larry_trade_accounting||{}).trade_map_trades || (d.larry_trade_accounting||{}).all_trades || (d.larry_trade_accounting||{}).recent_trades || []); const cutoff=tradeMapCutoff(range); return (rows||[]).map(r=>({...r,t:parseTimeMs(r.timestamp), fill:Number(r.fill_price||r.mark_at_send||0)})).filter(r=>r.t && r.t>=cutoff).sort((a,b)=>a.t-b.t); }
 function drawLineChart(canvas, points, opts){ if(!canvas) return []; const ctx=canvas.getContext('2d'); const dpr=window.devicePixelRatio||1; const rect=canvas.getBoundingClientRect(); const w=Math.max(320, rect.width||canvas.clientWidth||800), h=Math.max(120, rect.height||canvas.clientHeight||300); canvas.width=Math.round(w*dpr); canvas.height=Math.round(h*dpr); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,h); const pad={l:46,r:16,t:18,b:28}; const iw=w-pad.l-pad.r, ih=h-pad.t-pad.b; ctx.fillStyle='rgba(2,6,23,.28)'; ctx.fillRect(0,0,w,h); if(!points||points.length<2){ ctx.fillStyle='rgba(148,163,184,.8)'; ctx.font='13px system-ui'; ctx.fillText('Not enough data for this range yet',pad.l,pad.t+28); return []; } const xs=points.map(p=>p.t), ys=points.map(p=>p.y); const xmin=Math.min(...xs), xmax=Math.max(...xs); let ymin=Math.min(...ys), ymax=Math.max(...ys); if(ymin===ymax){ymin-=1;ymax+=1;} const ypad=(ymax-ymin)*0.08; ymin-=ypad; ymax+=ypad; const x=t=>pad.l+(t-xmin)/(xmax-xmin)*iw; const y=v=>pad.t+(ymax-v)/(ymax-ymin)*ih; ctx.strokeStyle='rgba(148,163,184,.16)'; ctx.lineWidth=1; ctx.font='11px system-ui'; ctx.fillStyle='rgba(148,163,184,.75)'; for(let i=0;i<4;i++){ const yy=pad.t+ih*i/3; ctx.beginPath(); ctx.moveTo(pad.l,yy); ctx.lineTo(w-pad.r,yy); ctx.stroke(); const val=ymax-(ymax-ymin)*i/3; const txt=(opts.valuePrefix||'')+(opts.valueFormat==='usd'?num(val,0):num(val,2)); ctx.fillText(txt,6,yy+4); } ctx.strokeStyle='rgba(56,189,248,.9)'; ctx.lineWidth=2; ctx.beginPath(); points.forEach((p,i)=>{ const xx=x(p.t), yy=y(p.y); if(i===0)ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy); }); ctx.stroke(); ctx.fillStyle='rgba(148,163,184,.75)'; const left=shortTimeLabel(xmin,opts.range), right=shortTimeLabel(xmax,opts.range); ctx.fillText(left,pad.l,h-8); const tw=ctx.measureText(right).width; ctx.fillText(right,w-pad.r-tw,h-8); return [{xmin,xmax,ymin,ymax,x,y,pad,w,h}][0]; }
@@ -4364,7 +4509,7 @@ function drawPnlBarChart(canvas, rows, opts){
  ctx.stroke();
  data.forEach((d,i)=>{ const xx=cx(i), yy=y(d.cum); ctx.fillStyle='rgba(56,189,248,.98)'; ctx.strokeStyle='rgba(2,6,23,.95)'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(xx,yy,3.5,0,Math.PI*2); ctx.fill(); ctx.stroke(); });
  ctx.fillStyle='rgba(148,163,184,.75)'; ctx.font='11px system-ui'; ctx.fillText(shortTimeLabel(parseTimeMs(data[0].timestamp)||Date.now(),opts.range),pad.l,h-10); const rt=shortTimeLabel(parseTimeMs(data[data.length-1].timestamp)||Date.now(),opts.range); const tw=ctx.measureText(rt).width; ctx.fillText(rt,w-pad.r-tw,h-10);
- const wins=data.filter(d=>d.y>0).length, losses=data.filter(d=>d.y<0).length, net=data[data.length-1].cum; ctx.font='12px system-ui'; ctx.fillStyle='rgba(226,232,240,.84)'; ctx.fillText(`Bars: per-trade P&L · Line: cumulative realized P&L · ${usd(net)}`, pad.l, 15);
+ const wins=data.filter(d=>d.y>0).length, losses=data.filter(d=>d.y<0).length, net=data[data.length-1].cum; ctx.font='12px system-ui'; ctx.fillStyle='rgba(226,232,240,.84)'; ctx.fillText(`Bars: per-trade P&L ? Line: cumulative realized P&L ? ${usd(net)}`, pad.l, 15);
  ctx.fillStyle='rgba(34,197,94,.88)'; ctx.fillRect(w-170,8,10,10); ctx.fillStyle='rgba(148,163,184,.82)'; ctx.fillText('Win',w-156,17);
  ctx.fillStyle='rgba(239,68,68,.88)'; ctx.fillRect(w-124,8,10,10); ctx.fillStyle='rgba(148,163,184,.82)'; ctx.fillText('Loss',w-110,17);
  ctx.strokeStyle='rgba(56,189,248,.96)'; ctx.lineWidth=2; ctx.beginPath(); ctx.moveTo(w-66,13); ctx.lineTo(w-42,13); ctx.stroke(); ctx.fillStyle='rgba(148,163,184,.82)'; ctx.fillText('Cum',w-38,17);
@@ -4378,10 +4523,10 @@ function renderTradeMap(d){ const range=__tradeMapRange||'1M'; const priceCanvas
  // v79: express Larry's range P&L as a % return on baseline so it is directly comparable
  // to the BTC move % over the same window (both are now % returns). $ figure kept in the note.
  const _base=Number((d.capital||{}).starting_combined_capital||0); const visiblePct=_base?visibleNet/_base*100:null;
- const btcMove=(pricePts.length>=2)?((pricePts[pricePts.length-1].y/pricePts[0].y-1)*100):null; set('tmTradeCount', String(trades.length)); set('tmVisiblePnl', visiblePct==null?usd(visibleNet):pct(visiblePct)); setClass('tmVisiblePnl','val '+cls(visibleNet)); set('tmBtcMove', btcMove==null?'—':pct(btcMove)); setClass('tmBtcMove','val '+cls(btcMove)); set('tmRangeLabel', range); set('tradeMapNote', `${range} view · ${pricePts.length} BTC price points · ${trades.length} Larry trade markers · range realized P&L ${usd(visibleNet)}${visiblePct==null?'':' ('+pct(visiblePct)+' on baseline)'}. Larry Return and BTC move are both % over this window. Lower chart shows per-trade net P&L bars plus all-time cumulative realized P&L.`);
- const tip=$('tradeMapTip'); const showTip=(ev)=>{ if(!tip||!__tradeMapMarkers.length) return; const rect=priceCanvas.getBoundingClientRect(); const cx=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left; const cy=(ev.touches?ev.touches[0].clientY:ev.clientY)-rect.top; let best=null, bd=9999; __tradeMapMarkers.forEach(m=>{const dd=Math.hypot(m.x-cx,m.y-cy); if(dd<bd){bd=dd; best=m;}}); if(!best||bd>28){ tip.style.display='none'; return; } const r=best.r,k=best.k; const net=r.net_realized_pnl_usd; tip.innerHTML=`<b>${k.emoji} ${k.label}</b><br>${r.timestamp_et||fmtET(r.timestamp)}<br>Reason: ${r.reason||'—'}<br>Contracts: ${num(r.contracts||0,0)}<br>Fill: ${usd(r.fill_price||r.mark_at_send)}<br>Position after: ${num(r.after_signed||0,0)}<br>${net==null||net===''?'Net P&L: —':'Net P&L: '+usd(net)+' · Running: '+usd(r.running_net_pnl_usd||0)}`; tip.style.left=Math.min(rect.width-270, Math.max(8,best.x+12))+'px'; tip.style.top=Math.min(rect.height-120, Math.max(8,best.y-20))+'px'; tip.style.display='block'; };
+ const btcMove=(pricePts.length>=2)?((pricePts[pricePts.length-1].y/pricePts[0].y-1)*100):null; set('tmTradeCount', String(trades.length)); set('tmVisiblePnl', visiblePct==null?usd(visibleNet):pct(visiblePct)); setClass('tmVisiblePnl','val '+cls(visibleNet)); set('tmBtcMove', btcMove==null?'?':pct(btcMove)); setClass('tmBtcMove','val '+cls(btcMove)); set('tmRangeLabel', range); set('tradeMapNote', `${range} view ? ${pricePts.length} BTC price points ? ${trades.length} Larry trade markers ? range realized P&L ${usd(visibleNet)}${visiblePct==null?'':' ('+pct(visiblePct)+' on baseline)'}. Larry Return and BTC move are both % over this window. Lower chart shows per-trade net P&L bars plus all-time cumulative realized P&L.`);
+ const tip=$('tradeMapTip'); const showTip=(ev)=>{ if(!tip||!__tradeMapMarkers.length) return; const rect=priceCanvas.getBoundingClientRect(); const cx=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left; const cy=(ev.touches?ev.touches[0].clientY:ev.clientY)-rect.top; let best=null, bd=9999; __tradeMapMarkers.forEach(m=>{const dd=Math.hypot(m.x-cx,m.y-cy); if(dd<bd){bd=dd; best=m;}}); if(!best||bd>28){ tip.style.display='none'; return; } const r=best.r,k=best.k; const net=r.net_realized_pnl_usd; tip.innerHTML=`<b>${k.emoji} ${k.label}</b><br>${r.timestamp_et||fmtET(r.timestamp)}<br>Reason: ${r.reason||'?'}<br>Contracts: ${num(r.contracts||0,0)}<br>Fill: ${usd(r.fill_price||r.mark_at_send)}<br>Position after: ${num(r.after_signed||0,0)}<br>${net==null||net===''?'Net P&L: ?':'Net P&L: '+usd(net)+' ? Running: '+usd(r.running_net_pnl_usd||0)}`; tip.style.left=Math.min(rect.width-270, Math.max(8,best.x+12))+'px'; tip.style.top=Math.min(rect.height-120, Math.max(8,best.y-20))+'px'; tip.style.display='block'; };
  priceCanvas.onmousemove=showTip; priceCanvas.ontouchstart=showTip; priceCanvas.onmouseleave=()=>{ if(tip) tip.style.display='none'; };
- const pnlTip=$('tradeMapPnlTip'); const showPnlTip=(ev)=>{ if(!pnlTip||!pnlChart||!pnlChart.bars.length) return; const rect=pnlCanvas.getBoundingClientRect(); const px=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left; let best=null,bd=Infinity; pnlChart.bars.forEach(b=>{const dist=Math.abs(b.cx-px);if(dist<bd){bd=dist;best=b;}}); if(!best||bd>Math.max(12,pnlChart.step*.75)){pnlTip.style.display='none';return;} const r=best.r; pnlTip.innerHTML=`<b>${r.y>=0?'Winning':'Losing'} realized trade</b><br>${r.timestamp_et||fmtET(r.timestamp)}<br>Per-trade P&L: ${usd(r.y)}<br>Cumulative realized P&L: ${usd(r.cum)}<br>${r.reason||r.trade_intent||'—'}`; pnlTip.style.left=Math.min(rect.width-245,Math.max(8,best.cx+10))+'px'; pnlTip.style.top='34px'; pnlTip.style.display='block'; };
+ const pnlTip=$('tradeMapPnlTip'); const showPnlTip=(ev)=>{ if(!pnlTip||!pnlChart||!pnlChart.bars.length) return; const rect=pnlCanvas.getBoundingClientRect(); const px=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left; let best=null,bd=Infinity; pnlChart.bars.forEach(b=>{const dist=Math.abs(b.cx-px);if(dist<bd){bd=dist;best=b;}}); if(!best||bd>Math.max(12,pnlChart.step*.75)){pnlTip.style.display='none';return;} const r=best.r; pnlTip.innerHTML=`<b>${r.y>=0?'Winning':'Losing'} realized trade</b><br>${r.timestamp_et||fmtET(r.timestamp)}<br>Per-trade P&L: ${usd(r.y)}<br>Cumulative realized P&L: ${usd(r.cum)}<br>${r.reason||r.trade_intent||'?'}`; pnlTip.style.left=Math.min(rect.width-245,Math.max(8,best.cx+10))+'px'; pnlTip.style.top='34px'; pnlTip.style.display='block'; };
  pnlCanvas.onmousemove=showPnlTip; pnlCanvas.ontouchstart=showPnlTip; pnlCanvas.onmouseleave=()=>{if(pnlTip)pnlTip.style.display='none';};
 }
 function initTradeMapControls(){ const c=$('tradeMapControls'); if(!c||c.dataset.ready) return; c.dataset.ready='1'; c.querySelectorAll('.tm-btn').forEach(btn=>btn.onclick=()=>{ __tradeMapRange=btn.dataset.range||'1M'; c.querySelectorAll('.tm-btn').forEach(b=>b.classList.toggle('on',b===btn)); if(window.__LAST_DASH_DATA) renderTradeMap(window.__LAST_DASH_DATA); }); }
@@ -4403,7 +4548,7 @@ function attachEquityHover(canvas){
    const ctx=canvas.getContext('2d'); ctx.save();
    ctx.strokeStyle='rgba(247,147,26,.5)'; ctx.lineWidth=1; ctx.setLineDash([4,4]); ctx.beginPath(); ctx.moveTo(bx,__eqScale.pad.t); ctx.lineTo(bx,__eqScale.h-__eqScale.pad.b); ctx.stroke(); ctx.setLineDash([]);
    ctx.fillStyle='#f7931a'; ctx.strokeStyle='rgba(7,8,11,.95)'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(bx,by,4.5,0,Math.PI*2); ctx.fill(); ctx.stroke(); ctx.restore();
-   if(tip){ const ret=__eqBase?((best.y/__eqBase-1)*100):null; const retTxt=(ret==null)?'—':((ret>=0?'+':'')+num(ret,2)+'%'); tip.innerHTML=`<b>${new Date(best.t).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</b><br>Equity <b>${usd(best.y)}</b><br>Return <b class="${ret==null?'':(ret>=0?'good':'bad')}">${retTxt}</b>`; tip.style.left=Math.min(rect.width-160,Math.max(8,bx+12))+'px'; tip.style.top=Math.max(8,by-46)+'px'; tip.style.display='block'; }
+   if(tip){ const ret=__eqBase?((best.y/__eqBase-1)*100):null; const retTxt=(ret==null)?'?':((ret>=0?'+':'')+num(ret,2)+'%'); tip.innerHTML=`<b>${new Date(best.t).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</b><br>Equity <b>${usd(best.y)}</b><br>Return <b class="${ret==null?'':(ret>=0?'good':'bad')}">${retTxt}</b>`; tip.style.left=Math.min(rect.width-160,Math.max(8,bx+12))+'px'; tip.style.top=Math.max(8,by-46)+'px'; tip.style.display='block'; }
  };
  canvas.onmousemove=move; canvas.ontouchstart=move; canvas.ontouchmove=move;
  canvas.onmouseleave=()=>{ if(tip) tip.style.display='none'; if(__eqSeries.length>=2) __eqScale=__eqDrawBase(canvas); };
@@ -4418,7 +4563,7 @@ function renderEquityCurve(d){
    .filter(r=>r.t).sort((a,b)=>a.t-b.t);
  if(!base || rows.length<1){
    __eqSeries=[]; __eqScale=null; drawLineChart(canvas,[],{range:'ALL',valueFormat:'usd',valuePrefix:'$'});
-   set('eqMaxDD','—'); set('eqSharpe','—'); set('eqPeak','—'); set('eqCurrent', base?usd(base):'—');
+   set('eqMaxDD','?'); set('eqSharpe','?'); set('eqPeak','?'); set('eqCurrent', base?usd(base):'?');
    set('eqNote', base?'Equity curve builds as Larry closes realized trades.':'Set the capital baseline to enable the equity curve.');
    return;
  }
@@ -4450,26 +4595,26 @@ function renderEquityCurve(d){
  // Draw the curve and enable the hover crosshair (equity + return % at the cursor).
  __eqSeries=series; __eqBase=base; __eqScale=__eqDrawBase(canvas); attachEquityHover(canvas);
  // Also surface max drawdown in the Attribution Drawdown tile (single source of truth).
- set('intelDrawdown', '-'+num(maxDDpct,2)+'%'); setClass('intelDrawdown','intel-val '+(maxDDpct>0?'bad':'muted')); set('intelDrawdownNote', `Max peak-to-trough ${usd(maxDDusd)} · Sharpe ${sharpeReady?num(sharpe,2):'accumulating'}. Larry strategy only.`);
+ set('intelDrawdown', '-'+num(maxDDpct,2)+'%'); setClass('intelDrawdown','intel-val '+(maxDDpct>0?'bad':'muted')); set('intelDrawdownNote', `Max peak-to-trough ${usd(maxDDusd)} ? Sharpe ${sharpeReady?num(sharpe,2):'accumulating'}. Larry strategy only.`);
 }
 
 function renderPerformanceAnalytics(d){
  const pa=d.performance_analytics||{}; const ts=pa.trade_stats||{}; const ex=pa.exposure_stats||{};
- set('paLarryEquity', pa.larry_equity_usd==null?'—':usd(pa.larry_equity_usd)); setClass('paLarryEquity','val '+cls(pa.larry_total_pnl_usd));
- set('paLarryNote', `Larry return ${pa.larry_return_pct==null?'—':pct(pa.larry_return_pct)}`);
- set('paBtcValue', pa.btc_benchmark_value_usd==null?'—':usd(pa.btc_benchmark_value_usd)); setClass('paBtcValue','val '+cls(pa.btc_benchmark_pnl_usd));
+ set('paLarryEquity', pa.larry_equity_usd==null?'?':usd(pa.larry_equity_usd)); setClass('paLarryEquity','val '+cls(pa.larry_total_pnl_usd));
+ set('paLarryNote', `Larry return ${pa.larry_return_pct==null?'?':pct(pa.larry_return_pct)}`);
+ set('paBtcValue', pa.btc_benchmark_value_usd==null?'?':usd(pa.btc_benchmark_value_usd)); setClass('paBtcValue','val '+cls(pa.btc_benchmark_pnl_usd));
  set('paBtcNote', pa.synthetic_btc_holdings?`${num(pa.synthetic_btc_holdings,6)} synthetic BTC`:'Benchmark unavailable');
- set('paBtcReturn', pa.btc_benchmark_return_pct==null?'—':pct(pa.btc_benchmark_return_pct)); setClass('paBtcReturn','val '+cls(pa.btc_benchmark_return_pct));
- set('paBtcPriceNote', `Start ${pa.start_btc_price?usd(pa.start_btc_price):'—'} · Now ${pa.current_btc_price?usd(pa.current_btc_price):'—'}`);
- set('paAlpha', pa.alpha_pct==null?'—':pct(pa.alpha_pct)); setClass('paAlpha','val '+cls(pa.alpha_pct));
- set('paAlphaNote', `Excess P&L ${pa.alpha_usd==null?'—':usd(pa.alpha_usd)}`);
+ set('paBtcReturn', pa.btc_benchmark_return_pct==null?'?':pct(pa.btc_benchmark_return_pct)); setClass('paBtcReturn','val '+cls(pa.btc_benchmark_return_pct));
+ set('paBtcPriceNote', `Start ${pa.start_btc_price?usd(pa.start_btc_price):'?'} ? Now ${pa.current_btc_price?usd(pa.current_btc_price):'?'}`);
+ set('paAlpha', pa.alpha_pct==null?'?':pct(pa.alpha_pct)); setClass('paAlpha','val '+cls(pa.alpha_pct));
+ set('paAlphaNote', `Excess P&L ${pa.alpha_usd==null?'?':usd(pa.alpha_usd)}`);
  set('paTrades', `${num(ts.realized_trades||0,0)} realized`);
- set('paWinRate', `Wins ${num(ts.winning_trades||0,0)} · Losses ${num(ts.losing_trades||0,0)} · Win rate ${ts.win_rate_pct==null?'—':pct(ts.win_rate_pct)}`);
- set('paProfitFactor', ts.profit_factor==null?'—':(ts.profit_factor>99?'∞':num(ts.profit_factor,2)));
- set('paExpectancy', `Expectancy ${ts.expectancy_usd==null?'—':usd(ts.expectancy_usd)}/trade`);
- set('paAvgWinLoss', `${ts.avg_winner_usd==null?'—':usd(ts.avg_winner_usd)} / ${ts.avg_loser_usd==null?'—':usd(ts.avg_loser_usd)}`);
- set('paExposure', `L ${ex.long_pct==null?'—':num(ex.long_pct,0)+'%'} · S ${ex.short_pct==null?'—':num(ex.short_pct,0)+'%'} · F ${ex.flat_pct==null?'—':num(ex.flat_pct,0)+'%'}`);
- set('paExposureNote', ex.total_hours?`${num(ex.total_hours,1)} tracked hours · ${ex.method||''}`:'Exposure starts after first ledger event');
+ set('paWinRate', `Wins ${num(ts.winning_trades||0,0)} ? Losses ${num(ts.losing_trades||0,0)} ? Win rate ${ts.win_rate_pct==null?'?':pct(ts.win_rate_pct)}`);
+ set('paProfitFactor', ts.profit_factor==null?'?':(ts.profit_factor>99?'?':num(ts.profit_factor,2)));
+ set('paExpectancy', `Expectancy ${ts.expectancy_usd==null?'?':usd(ts.expectancy_usd)}/trade`);
+ set('paAvgWinLoss', `${ts.avg_winner_usd==null?'?':usd(ts.avg_winner_usd)} / ${ts.avg_loser_usd==null?'?':usd(ts.avg_loser_usd)}`);
+ set('paExposure', `L ${ex.long_pct==null?'?':num(ex.long_pct,0)+'%'} ? S ${ex.short_pct==null?'?':num(ex.short_pct,0)+'%'} ? F ${ex.flat_pct==null?'?':num(ex.flat_pct,0)+'%'}`);
+ set('paExposureNote', ex.total_hours?`${num(ex.total_hours,1)} tracked hours ? ${ex.method||''}`:'Exposure starts after first ledger event');
  set('paMethodNote', pa.note||'Benchmark uses starting capital and BTC price.');
  const bars=$('paReturnBars'); if(bars){
    const vals=[['Larry', Number(pa.larry_return_pct||0)], ['BTC', Number(pa.btc_benchmark_return_pct||0)], ['Alpha', Number(pa.alpha_pct||0)]];
@@ -4485,18 +4630,18 @@ function renderLarryAccounting(d){
  set('larryOpenNote', `${la.open_side||'FLAT'} ${num(la.open_contracts||0,0)} contracts`);
  set('larryTotalPnl', usd(la.net_total_pnl_usd)); setClass('larryTotalPnl','val '+cls(la.net_total_pnl_usd));
  const last=la.last_realized_trade||{};
- set('larryLastTradePnl', last.net_realized_pnl_usd!=null?usd(last.net_realized_pnl_usd):'—'); setClass('larryLastTradePnl','val '+cls(last.net_realized_pnl_usd));
- set('larryLastTradeNote', last.reason?`${last.reason} · ${last.action||''} ${num(last.contracts||0,0)} @ ${usd(last.fill_price)}`:'No realized exit yet');
+ set('larryLastTradePnl', last.net_realized_pnl_usd!=null?usd(last.net_realized_pnl_usd):'?'); setClass('larryLastTradePnl','val '+cls(last.net_realized_pnl_usd));
+ set('larryLastTradeNote', last.reason?`${last.reason} ? ${last.action||''} ${num(last.contracts||0,0)} @ ${usd(last.fill_price)}`:'No realized exit yet');
  const body=$('larryTradeTapeBody');
  if(body){
    const rows=la.recent_trades||[];
    body.innerHTML=rows.length?rows.map(r=>{
      const net = r.net_realized_pnl_usd;
      const gross = r.gross_realized_pnl_usd;
-     const intent = r.trade_intent || r.execution_reason || '—';
-     const liq = r.liquidity || '—';
+     const intent = r.trade_intent || r.execution_reason || '?';
+     const liq = r.liquidity || '?';
      const liqCls = String(liq).toUpperCase().startsWith('MAKER') ? 'good' : (String(liq).toUpperCase().startsWith('TAKER') ? 'warn' : 'muted');
-     return `<tr><td>${r.timestamp_et||fmtET(r.timestamp)}</td><td>${intent}</td><td>${r.signal_reason||r.reason||'—'}</td><td>${r.action||'—'}</td><td>${num(r.contracts||0,0)}</td><td>${usd(r.fill_price)}</td><td class="${cls(gross)}">${gross==null?'—':usd(gross)}</td><td>${usd(r.fees_usd||0)}</td><td class="${cls(net)}"><strong>${net==null?'—':usd(net)}</strong></td><td>${r.slippage_bps==null?'—':num(r.slippage_bps,2)+' bps'}</td><td class="${liqCls}">${liq}</td></tr>`
+     return `<tr><td>${r.timestamp_et||fmtET(r.timestamp)}</td><td>${intent}</td><td>${r.signal_reason||r.reason||'?'}</td><td>${r.action||'?'}</td><td>${num(r.contracts||0,0)}</td><td>${usd(r.fill_price)}</td><td class="${cls(gross)}">${gross==null?'?':usd(gross)}</td><td>${usd(r.fees_usd||0)}</td><td class="${cls(net)}"><strong>${net==null?'?':usd(net)}</strong></td><td>${r.slippage_bps==null?'?':num(r.slippage_bps,2)+' bps'}</td><td class="${liqCls}">${liq}</td></tr>`
    }).join(''):'<tr><td colspan="11" class="muted">No Larry ledger trades found yet.</td></tr>';
  }
  const bars=$('larryPnlBars');
@@ -4515,15 +4660,15 @@ function renderLarryAccounting(d){
  }
  set('larryAccountingNote', la.note || 'Larry ledger accounting active.');
  const eq=la.execution_quality||{};
- set('execAvgSlip', eq.avg_slippage_bps==null?'—':num(eq.avg_slippage_bps,2)+' bps');
- set('execSlipRange', `Best ${eq.best_slippage_bps==null?'—':num(eq.best_slippage_bps,2)+' bps'} · Worst ${eq.worst_slippage_bps==null?'—':num(eq.worst_slippage_bps,2)+' bps'}`);
+ set('execAvgSlip', eq.avg_slippage_bps==null?'?':num(eq.avg_slippage_bps,2)+' bps');
+ set('execSlipRange', `Best ${eq.best_slippage_bps==null?'?':num(eq.best_slippage_bps,2)+' bps'} ? Worst ${eq.worst_slippage_bps==null?'?':num(eq.worst_slippage_bps,2)+' bps'}`);
  const maker=Number(eq.maker_count||0), taker=Number(eq.taker_count||0), sample=Number(eq.sample_trades||0);
  const makerPct=sample?maker/sample*100:null, takerPct=sample?taker/sample*100:null;
- set('execMakerTaker', `${makerPct==null?'—':num(makerPct,0)+'%'} / ${takerPct==null?'—':num(takerPct,0)+'%'}`);
- set('execMakerTakerNote', `${num(maker,0)} maker · ${num(taker,0)} taker · ${num(eq.unknown_count||0,0)} unknown`);
+ set('execMakerTaker', `${makerPct==null?'?':num(makerPct,0)+'%'} / ${takerPct==null?'?':num(takerPct,0)+'%'}`);
+ set('execMakerTakerNote', `${num(maker,0)} maker ? ${num(taker,0)} taker ? ${num(eq.unknown_count||0,0)} unknown`);
  set('execFeesPaid', usd(eq.fees_usd||0));
  const avgAbs = eq.avg_slippage_bps==null ? null : Math.abs(Number(eq.avg_slippage_bps));
- let score='—'; if(avgAbs!=null){ score = avgAbs<=2?'A':(avgAbs<=5?'B':(avgAbs<=10?'C':'D')); }
+ let score='?'; if(avgAbs!=null){ score = avgAbs<=2?'A':(avgAbs<=5?'B':(avgAbs<=10?'C':'D')); }
  set('execScore', score);
  set('execScoreNote', sample?`${num(sample,0)} successful Larry orders`:'No successful orders yet');
  set('execQualityNote', eq.note || 'Execution quality summarizes Larry trade fills.');
@@ -4550,25 +4695,25 @@ function renderLarryMindset(d){
  const maxN=Number(cfg.MAX_CONVICTION_CONTRACTS||10), probe=Math.max(1,Math.round(maxN*Number(cfg.PROBE_PCT||.2))), partial=Math.max(probe,Math.round(maxN*Number(cfg.PARTIAL_PCT||.4))), strong=Math.max(partial,Math.round(maxN*Number(cfg.STRONG_PCT||.7)));
  const target=hasPosition?contracts:(best>=4?maxN:best>=3?strong:best>=2?partial:best>=1?probe:0);
  const tier=target>=maxN?'FULL':target>=strong?'STRONG':target>=partial?'PARTIAL':target>0?'PROBE':'WAITING';
- let decision='WATCHING — waiting for a qualified setup', reason=diag.explanation||diag.next_action||'Larry is monitoring the next closed-candle signal.', badge='WATCHING', badgeClass='';
+ let decision='WATCHING ? waiting for a qualified setup', reason=diag.explanation||diag.next_action||'Larry is monitoring the next closed-candle signal.', badge='WATCHING', badgeClass='';
  let activeStep='mindsetTriggerStep';
- if(!riskOk){decision='BLOCKED — risk gate is closed';reason=(es.risk_gate||{}).reason||'New entries are disabled by the active risk gate.';badge='BLOCKED';badgeClass='bad';activeStep='mindsetRegimeStep';}
+ if(!riskOk){decision='BLOCKED ? risk gate is closed';reason=(es.risk_gate||{}).reason||'New entries are disabled by the active risk gate.';badge='BLOCKED';badgeClass='bad';activeStep='mindsetRegimeStep';}
  else if(hasPosition){
    activeStep='mindsetExitStep';
-   if(!autoManaged){decision=`UNMANAGED ${pr.side||direction} — monitor only`;reason='Larry does not have execution authority for this position. Any displayed stop or target is informational and will not execute.';badge='MONITOR ONLY';badgeClass='bad';}
-   else if(pr.tsl_active){decision=`PROTECTING ${pr.side||direction} — trailing stop active`;reason=`Larry is managing ${num(contracts,0)} contracts with the trailing stop as the active exit.`;badge='PROTECTING';badgeClass='good';}
-   else if(pc.tp1_done===true){decision=`HOLDING ${pr.side||direction} — TP step completed`;reason='The first profit-taking step is complete; Larry is waiting for trailing-stop activation or another exit condition.';badge='AUTO-MANAGED';badgeClass='good';}
-   else {decision=`HOLDING ${pr.side||direction} — automatically managed`;reason=pr.status||'ATR protection is active while Larry watches the profit-taking thresholds.';badge='AUTO-MANAGED';badgeClass='good';}
- } else if(!macroOpen||!fundingOk){decision='FILTERED — setup cannot advance';reason=!macroOpen?(diag.macro_reason||'The macro gate is blocking this setup.'):(direction+' funding gate is not open.');badge='FILTERED';badgeClass='warn';activeStep='mindsetRegimeStep';}
- else if(lifecycle.includes('COMMITTED')||best>=commit){decision=`COMMITTED ${direction} — execution checks active`;reason=diag.next_action||'The signal reached commit strength; Larry is checking lifecycle and execution gates.';badge='COMMITTED';badgeClass='good';activeStep='mindsetConvictionStep';}
- else if(lifecycle==='PHANTOM_ARMED'||best>=arm){decision=`ARMED ${direction} — awaiting confirmation`;reason=ph.reason||diag.next_action||'The setup reached the arm threshold and is waiting for its closed-candle confirmation.';badge='ARMED';badgeClass='warn';activeStep='mindsetTriggerStep';}
+   if(!autoManaged){decision=`UNMANAGED ${pr.side||direction} ? monitor only`;reason='Larry does not have execution authority for this position. Any displayed stop or target is informational and will not execute.';badge='MONITOR ONLY';badgeClass='bad';}
+   else if(pr.tsl_active){decision=`PROTECTING ${pr.side||direction} ? trailing stop active`;reason=`Larry is managing ${num(contracts,0)} contracts with the trailing stop as the active exit.`;badge='PROTECTING';badgeClass='good';}
+   else if(pc.tp1_done===true){decision=`HOLDING ${pr.side||direction} ? TP step completed`;reason='The first profit-taking step is complete; Larry is waiting for trailing-stop activation or another exit condition.';badge='AUTO-MANAGED';badgeClass='good';}
+   else {decision=`HOLDING ${pr.side||direction} ? automatically managed`;reason=pr.status||'ATR protection is active while Larry watches the profit-taking thresholds.';badge='AUTO-MANAGED';badgeClass='good';}
+ } else if(!macroOpen||!fundingOk){decision='FILTERED ? setup cannot advance';reason=!macroOpen?(diag.macro_reason||'The macro gate is blocking this setup.'):(direction+' funding gate is not open.');badge='FILTERED';badgeClass='warn';activeStep='mindsetRegimeStep';}
+ else if(lifecycle.includes('COMMITTED')||best>=commit){decision=`COMMITTED ${direction} ? execution checks active`;reason=diag.next_action||'The signal reached commit strength; Larry is checking lifecycle and execution gates.';badge='COMMITTED';badgeClass='good';activeStep='mindsetConvictionStep';}
+ else if(lifecycle==='PHANTOM_ARMED'||best>=arm){decision=`ARMED ${direction} ? awaiting confirmation`;reason=ph.reason||diag.next_action||'The setup reached the arm threshold and is waiting for its closed-candle confirmation.';badge='ARMED';badgeClass='warn';activeStep='mindsetTriggerStep';}
  set('mindsetDecision',decision); set('mindsetReason',String(reason).replaceAll('_',' ').slice(0,260)); set('mindsetBadge',badge); setClass('mindsetBadge','mindset-badge '+badgeClass);
- set('mindsetRegime',`${macroOpen?'Macro open':'Macro blocked'} · ${fundingOk?'Funding OK':'Funding check'}`); set('mindsetRegimeNote',riskOk?'Risk gate allows entries':'Risk gate blocks entries');
- set('mindsetTrigger',`LONG ${ls}/4 · SHORT ${ss}/4`); set('mindsetTriggerNote',`Arm ${arm}/4 · commit ${commit}/4 · ${String(diag.next_action||'waiting').replaceAll('_',' ')}`);
- set('mindsetConviction',`${tier} · target ${num(target,0)}`); set('mindsetConvictionNote',`Scale: probe ${probe} · partial ${partial} · strong ${strong} · full ${maxN}`);
- set('mindsetPosition',hasPosition?`${pr.side||direction} · ${num(contracts,0)} contracts`:'FLAT · no position'); set('mindsetPositionNote',hasPosition?(es.add_on_state&&es.add_on_state.adds_count?`${es.add_on_state.adds_count}/${cfg.MAX_POSITION_ADDS||3} progressive adds used`:'No progressive add recorded'):'Waiting for a committed entry');
- const exitValue=!hasPosition?'Not armed':!autoManaged?'DISPLAY ONLY — NO AUTO EXIT':pr.tsl_active?'Trailing stop active':pc.tp1_done===true?'TP step done':'ATR stop active';
- set('mindsetExit',exitValue); set('mindsetExitNote',hasPosition?(!autoManaged?`Calculated stop ${pr.active_stop?usd(pr.active_stop):'—'} · Larry will not execute it`:`Executable stop ${pr.active_stop?usd(pr.active_stop):'—'} · trail activates ${pr.tsl_activation_price?usd(pr.tsl_activation_price):'—'}`):'Exit levels initialize at entry');
+ set('mindsetRegime',`${macroOpen?'Macro open':'Macro blocked'} ? ${fundingOk?'Funding OK':'Funding check'}`); set('mindsetRegimeNote',riskOk?'Risk gate allows entries':'Risk gate blocks entries');
+ set('mindsetTrigger',`LONG ${ls}/4 ? SHORT ${ss}/4`); set('mindsetTriggerNote',`Arm ${arm}/4 ? commit ${commit}/4 ? ${String(diag.next_action||'waiting').replaceAll('_',' ')}`);
+ set('mindsetConviction',`${tier} ? target ${num(target,0)}`); set('mindsetConvictionNote',`Scale: probe ${probe} ? partial ${partial} ? strong ${strong} ? full ${maxN}`);
+ set('mindsetPosition',hasPosition?`${pr.side||direction} ? ${num(contracts,0)} contracts`:'FLAT ? no position'); set('mindsetPositionNote',hasPosition?(es.add_on_state&&es.add_on_state.adds_count?`${es.add_on_state.adds_count}/${cfg.MAX_POSITION_ADDS||3} progressive adds used`:'No progressive add recorded'):'Waiting for a committed entry');
+ const exitValue=!hasPosition?'Not armed':!autoManaged?'DISPLAY ONLY ? NO AUTO EXIT':pr.tsl_active?'Trailing stop active':pc.tp1_done===true?'TP step done':'ATR stop active';
+ set('mindsetExit',exitValue); set('mindsetExitNote',hasPosition?(!autoManaged?`Calculated stop ${pr.active_stop?usd(pr.active_stop):'?'} ? Larry will not execute it`:`Executable stop ${pr.active_stop?usd(pr.active_stop):'?'} ? trail activates ${pr.tsl_activation_price?usd(pr.tsl_activation_price):'?'}`):'Exit levels initialize at entry');
  ['mindsetRegimeStep','mindsetTriggerStep','mindsetConvictionStep','mindsetPositionStep','mindsetExitStep'].forEach(id=>{const e=$(id);if(e)e.className='mindset-step';});
  const order=['mindsetRegimeStep','mindsetTriggerStep','mindsetConvictionStep','mindsetPositionStep','mindsetExitStep'], ai=order.indexOf(activeStep);
  order.forEach((id,i)=>{const e=$(id);if(!e)return;if(i<ai)e.classList.add('done');else if(i===ai)e.classList.add('active');});
@@ -4583,8 +4728,8 @@ function renderLarryMindset(d){
  const sb=es.stop_blown||{}, scores=sb.scores||{}; set('stopBlownState',sb.active?`${sb.leader||'OBSERVING'} / SHADOW`:'Inactive / shadow'); set('stopBlownScores',sb.active?`Fish ${num((scores.FISHED||0)*100,0)}% / Save ${num((scores.SAVED||0)*100,0)}% / Extreme ${num((scores.EXTREME||0)*100,0)}%`:'SB1-SB5 observer cannot trade');
  const progress=hasPosition?(pr.tsl_active?100:Math.max(0,Math.min(100,tslPct?uplPct/tslPct*100:0))):0;
  const fill=$('mindsetProfitFill'), marker=$('mindsetTpMarker'); if(fill)fill.style.width=progress+'%'; if(marker)marker.style.left=Math.max(0,Math.min(100,tslPct?tpPct/tslPct*100:50))+'%';
- set('mindsetProfitValue',hasPosition?`${uplPct>=0?'+':''}${num(uplPct,2)}% · ${pc.tp1_done?'TP passed':pr.tsl_active?'trail active':'building protection'}`:'Flat / waiting');
- set('mindsetTpLabel',`TP ${num(tpPct,2)}%${pc.tp1_done?' ✓':''}`); set('mindsetTrailLabel',`Trail ${num(tslPct,2)}%${pr.tsl_active?' ✓':''}`);
+ set('mindsetProfitValue',hasPosition?`${uplPct>=0?'+':''}${num(uplPct,2)}% ? ${pc.tp1_done?'TP passed':pr.tsl_active?'trail active':'building protection'}`:'Flat / waiting');
+ set('mindsetTpLabel',`TP ${num(tpPct,2)}%${pc.tp1_done?' ?':''}`); set('mindsetTrailLabel',`Trail ${num(tslPct,2)}%${pr.tsl_active?' ?':''}`);
 }
 
 function renderEntryDiagnostics(d){
@@ -4595,25 +4740,25 @@ function renderEntryDiagnostics(d){
    return;
  }
  const ls=Number(diag.long_score||0), ss=Number(diag.short_score||0), arm=Number(diag.signal_arm_score||2), commit=Number(diag.signal_commit_score||3);
- set('diagScores',`LONG ${ls}/4 · SHORT ${ss}/4`); setClass('diagScores','v12-val '+((ls>=arm||ss>=arm)?'good':'warn'));
- set('diagScoreNote',`Arm at ${arm}/4 · Commit at ${commit}/4 · checked ${fmtET(diag.checked_at)}`);
+ set('diagScores',`LONG ${ls}/4 ? SHORT ${ss}/4`); setClass('diagScores','v12-val '+((ls>=arm||ss>=arm)?'good':'warn'));
+ set('diagScoreNote',`Arm at ${arm}/4 ? Commit at ${commit}/4 ? checked ${fmtET(diag.checked_at)}`);
  set('diagLongStatus', ls>=arm?'Can arm':'Waiting'); setClass('diagLongStatus','v12-val '+(ls>=arm?'good':'warn'));
- set('diagLongMissing',`${condList(diag.long_conditions)} · Need +${diag.core_long_arm_gap ?? '—'} to arm / +${diag.core_long_commit_gap ?? '—'} to commit`);
+ set('diagLongMissing',`${condList(diag.long_conditions)} ? Need +${diag.core_long_arm_gap ?? '?'} to arm / +${diag.core_long_commit_gap ?? '?'} to commit`);
  set('diagShortStatus', ss>=arm?'Can arm':'Waiting'); setClass('diagShortStatus','v12-val '+(ss>=arm?'good':'warn'));
- set('diagShortMissing',`${condList(diag.short_conditions)} · Need +${diag.core_short_arm_gap ?? '—'} to arm / +${diag.core_short_commit_gap ?? '—'} to commit`);
+ set('diagShortMissing',`${condList(diag.short_conditions)} ? Need +${diag.core_short_arm_gap ?? '?'} to arm / +${diag.core_short_commit_gap ?? '?'} to commit`);
  const prDir=diag.reversal_probe_direction || rp.direction || null;
  set('diagProbeStatus', prDir?`${prDir} probe can arm`:'Not qualified'); setClass('diagProbeStatus','v12-val '+(prDir?'good':'warn'));
- set('diagProbeReason', (diag.reversal_probe_reason || rp.reason || '—').slice(0,260));
+ set('diagProbeReason', (diag.reversal_probe_reason || rp.reason || '?').slice(0,260));
  const macroOpen=diag.macro_gate_open===true; const longFund=diag.funding_long_ok!==false; const shortFund=diag.funding_short_ok!==false;
- set('diagGates',`${macroOpen?'Macro open':'Macro blocked'} · F:${longFund&&shortFund?'OK':'Check'}`); setClass('diagGates','v12-val '+(macroOpen?'good':'warn'));
- set('diagGatesNote',`${diag.macro_reason||''} · Long funding: ${diag.funding_long_reason||'OK'} · Short funding: ${diag.funding_short_reason||'OK'}`.slice(0,260));
- set('diagNextAction', (diag.next_action||'—').replaceAll('_',' ')); setClass('diagNextAction','v12-val '+((diag.next_action||'').includes('CAN')?'good':'warn'));
+ set('diagGates',`${macroOpen?'Macro open':'Macro blocked'} ? F:${longFund&&shortFund?'OK':'Check'}`); setClass('diagGates','v12-val '+(macroOpen?'good':'warn'));
+ set('diagGatesNote',`${diag.macro_reason||''} ? Long funding: ${diag.funding_long_reason||'OK'} ? Short funding: ${diag.funding_short_reason||'OK'}`.slice(0,260));
+ set('diagNextAction', (diag.next_action||'?').replaceAll('_',' ')); setClass('diagNextAction','v12-val '+((diag.next_action||'').includes('CAN')?'good':'warn'));
  const blockers=(diag.blockers||[]).length ? `Blockers: ${(diag.blockers||[]).join(', ')}` : 'No hard blockers; waiting for score/probe/confirmation.';
  set('diagNextNote', blockers.slice(0,220));
  set('diagFinalLongScore', `LONG ${ls}/4`); setClass('diagFinalLongScore','value '+(ls>=commit?'good':ls>=arm?'warn':'muted'));
- set('diagFinalLongNote', `Arm ${arm}/4 · Commit ${commit}/4 · ${diag.core_long_arm_gap==null?'':('needs +'+diag.core_long_arm_gap+' to arm')}`);
+ set('diagFinalLongNote', `Arm ${arm}/4 ? Commit ${commit}/4 ? ${diag.core_long_arm_gap==null?'':('needs +'+diag.core_long_arm_gap+' to arm')}`);
  set('diagFinalShortScore', `SHORT ${ss}/4`); setClass('diagFinalShortScore','value '+(ss>=commit?'bad':ss>=arm?'warn':'muted'));
- set('diagFinalShortNote', `Arm ${arm}/4 · Commit ${commit}/4 · ${diag.core_short_arm_gap==null?'':('needs +'+diag.core_short_arm_gap+' to arm')}`);
+ set('diagFinalShortNote', `Arm ${arm}/4 ? Commit ${commit}/4 ? ${diag.core_short_arm_gap==null?'':('needs +'+diag.core_short_arm_gap+' to arm')}`);
  // v67: make current-vs-historical signal state explicit. Do not let old sizing/order state read as a live trigger.
  const sd = es.last_core_sizing_decision || (es.last_core_target_plan && es.last_core_target_plan.sizing_decision) || {};
  const le = es.last_execution_result || es.last_completed_trade || es.last_realized_trade || {};
@@ -4622,18 +4767,18 @@ function renderEntryDiagnostics(d){
  const fundingOk = (diag.funding_long_ok !== false && diag.funding_short_ok !== false);
  const position = es.exchange_position || {};
  const currentIsLive = (Math.max(ls, ss) >= commit) || prDir || String(phTruth.state||'').includes('COMMITTED');
- set('currentSignalTruth', `LONG ${ls}/4 · SHORT ${ss}/4`);
+ set('currentSignalTruth', `LONG ${ls}/4 ? SHORT ${ss}/4`);
  setClass('currentSignalTruth','value '+(currentIsLive?'good':'muted'));
- set('currentSignalTruthNote', `Current cycle checked ${fmtET(diag.checked_at)} · ${diag.next_action||'WAITING'}`);
- const sdSig = sd.signal || '—';
- const sdScore = sd.score==null ? '—' : `${sd.score}/4`;
+ set('currentSignalTruthNote', `Current cycle checked ${fmtET(diag.checked_at)} ? ${diag.next_action||'WAITING'}`);
+ const sdSig = sd.signal || '?';
+ const sdScore = sd.score==null ? '?' : `${sd.score}/4`;
  set('lastSizingTruth', `${sdSig} ${sdScore}`);
  setClass('lastSizingTruth','value muted');
- set('lastSizingTruthNote', sd.reason ? `Historical sizing: ${sd.reason} · target ${sd.target_abs_contracts ?? sd.final_contracts ?? '—'} · not live` : 'No prior sizing decision recorded');
+ set('lastSizingTruthNote', sd.reason ? `Historical sizing: ${sd.reason} ? target ${sd.target_abs_contracts ?? sd.final_contracts ?? '?'} ? not live` : 'No prior sizing decision recorded');
  const lePlan = le.plan || {};
- const leReason = le.reason || lePlan.explanation || '—';
- const leAction = lePlan.action || (le.order && le.order.client_order_id) || '—';
- set('lastExecutionTruth', leReason==='—'?'—':`${leAction} · ${leReason}`);
+ const leReason = le.reason || lePlan.explanation || '?';
+ const leAction = lePlan.action || (le.order && le.order.client_order_id) || '?';
+ set('lastExecutionTruth', leReason==='?'?'?':`${leAction} ? ${leReason}`);
  setClass('lastExecutionTruth','value muted');
  set('lastExecutionTruthNote', le.ok===true ? `Historical execution/fill. Current exchange: ${position.side||'FLAT'} ${num(position.contracts||0,0)}` : 'No current order result; historical only');
  let liveTxt='NO LIVE TRIGGER'; let liveNote='Waiting for score/probe confirmation.'; let liveClass='muted';
@@ -4681,10 +4826,10 @@ function renderEntryDiagnostics(d){
  else if(prDir) expected=`Arm ${prDir} reversal probe`;
  else if(ls>=commit) expected='Core LONG can commit if lifecycle/risk checks pass';
  else if(ss>=commit) expected='Core SHORT can commit if lifecycle/risk checks pass';
- else if(nearLower) expected=`Watch LONG reversal: need ${missingLong.slice(0,2).join(' + ') || 'confirmation'}${missingLong.length>2?'…':''}`;
+ else if(nearLower) expected=`Watch LONG reversal: need ${missingLong.slice(0,2).join(' + ') || 'confirmation'}${missingLong.length>2?'?':''}`;
  else if(nearUpper) expected='Watch SHORT reversal: need RSI/Stoch confirmation';
  set('oppNote', `Expected next action: ${expected}`);
- const checkHtml='<div class="checkline">'+checks.map(([name,ok])=>`<span class="checkpill ${ok?'yes':'no'}">${ok?'✓':'×'} ${name}</span>`).join('')+'</div>';
+ const checkHtml='<div class="checkline">'+checks.map(([name,ok])=>`<span class="checkpill ${ok?'yes':'no'}">${ok?'?':'?'} ${name}</span>`).join('')+'</div>';
  if(opp){
    const blockers=(diag.blockers||[]);
    let msg=`Opportunity Level: ${level}. Final score LONG ${ls}/4, SHORT ${ss}/4. Expected next action: ${expected}.`;
@@ -4710,9 +4855,9 @@ function renderKillSwitch(h){
  h = h || {};
  const isOn = h.halt === true;
  box.className = 'halt-status ' + (isOn ? 'on' : 'off');
- box.textContent = isOn ? '🛑 HALTED — order placement disabled' : '🟢 LIVE — order placement allowed';
+ box.textContent = isOn ? '?? HALTED ? order placement disabled' : '?? LIVE ? order placement allowed';
  set('haltReason', h.reason || (isOn ? 'operator halt active' : 'not halted'));
- set('haltSetBy', ((h.set_by || '—') + (h.set_at ? ' · ' + h.set_at : '')));
+ set('haltSetBy', ((h.set_by || '?') + (h.set_at ? ' ? ' + h.set_at : '')));
 }
 async function setKillSwitch(on){
  const reason = on ? prompt('Reason for HALT?', 'operator_halt_from_dashboard') : '';
@@ -4738,13 +4883,13 @@ async function emergencyFlatten(){
    let d={};
    try{ d = await r.json(); }catch(_){ d = {ok:false, error:'Non-JSON response from dashboard'}; }
    if(!d.ok){
-     alert('🚨 EMERGENCY FLATTEN REQUEST FAILED\n' + (d.error || d.message || 'unknown'));
+     alert('?? EMERGENCY FLATTEN REQUEST FAILED\n' + (d.error || d.message || 'unknown'));
      setTimeout(refresh, 700);
      return;
    }
-   alert('✅ ' + (d.message||'Emergency flatten request accepted') + '\nRequest: ' + (d.request_id||'—') + '\nPosition hint: ' + JSON.stringify(d.position_hint||{}));
+   alert('? ' + (d.message||'Emergency flatten request accepted') + '\nRequest: ' + (d.request_id||'?') + '\nPosition hint: ' + JSON.stringify(d.position_hint||{}));
    setTimeout(refresh, 1500);
- }catch(e){ alert('🚨 Emergency flatten request failed before dashboard response: ' + e); }
+ }catch(e){ alert('?? Emergency flatten request failed before dashboard response: ' + e); }
 }
 
 async function saveStrategyControls(){
@@ -4767,7 +4912,7 @@ async function saveStrategyControls(){
  if(!Number.isFinite(probePct)||probePct<5||probePct>100){ set('controlStatus','Probe % must be between 5% and 100%.'); return; }
  if(!Number.isFinite(partialPct)||partialPct<5||partialPct>100){ set('controlStatus','Partial % must be between 5% and 100%.'); return; }
  if(!Number.isFinite(strongPct)||strongPct<5||strongPct>100){ set('controlStatus','Strong % must be between 5% and 100%.'); return; }
- if(!(probePct<=partialPct && partialPct<=strongPct)){ set('controlStatus','Sizing percentages must be ordered: Probe ≤ Partial ≤ Strong.'); return; }
+ if(!(probePct<=partialPct && partialPct<=strongPct)){ set('controlStatus','Sizing percentages must be ordered: Probe ? Partial ? Strong.'); return; }
  if(!Number.isFinite(maxAdds)||maxAdds<0||maxAdds>10){ set('controlStatus','Max Adds / Position must be between 0 and 10.'); return; }
  if(!Number.isFinite(signalValidity)||signalValidity<1||signalValidity>120){ set('controlStatus','Signal Lock / Reversal Probe Minutes must be between 1 and 120.'); return; }
  if(!Number.isFinite(signalCancel)||signalCancel<0||signalCancel>4){ set('controlStatus','Cancel Score must be between 0 and 4.'); return; }
@@ -4825,41 +4970,76 @@ function renderSpotToggleStatus(cfg){
  const spot=!!(cfg && cfg.ENABLE_SPOT_BTC_TRADING);
  const bridge=!!(cfg && cfg.ENABLE_SPOT_BRIDGE_PERP_BUYS);
  pill('spotTradingPill', spot?'SPOT BTC ENABLED':'SPOT BTC DISABLED', spot?'warn':'good');
- pill('spotBridgePill', bridge?'SPOT→PERP BRIDGE ON':'SPOT→PERP BRIDGE OFF', bridge?'warn':'good');
+ pill('spotBridgePill', bridge?'SPOT?PERP BRIDGE ON':'SPOT?PERP BRIDGE OFF', bridge?'warn':'good');
 }
 async function refresh(){try{const r=await fetch('/api/data?ts='+Date.now(),{cache:'no-store'}); const d=await r.json(); window.__LAST_DASH_DATA=d; if(!d.ok){$('errorBox').style.display='block';$('errorBox').textContent=d.error+'\n'+(d.trace||'');return} $('errorBox').style.display='none'; warn(d.warnings||[]); const c=d.capital||{}, pnl=d.pnl_summary||{}, sb=d.spot_balance||{}, fb=d.futures_balance||{}, cfg=d.config||{}, hb=d.heartbeat||{}, pm=d.perp_product||{}, mac=d.macro||{}, fills=d.fills||{}, perpMon=d.perp_signal_monitor||{};
- set('btcPrice',d.price?'$'+num(d.price,2):'—');
- // v78: global data-freshness in the header — is the feed live? (was buried in System Health)
- const _age=((d.risk_intelligence||{}).health||{}).heartbeat_age_secs; const _fresh=(_age==null)?'':' · feed '+(_age<=120?'●':'○')+' '+_age+'s';
- set('serverTime',(d.server_time||'—')+_fresh); set('dashboardRefresh','Dashboard refreshed '+new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'})); set('productLine',`${cfg.SPOT_PRODUCT_ID||'BTC-USDC'} · ${cfg.PERP_PRODUCT_ID||'BIP-20DEC30-CDE'}`);
+ set('btcPrice',d.price?'$'+num(d.price,2):'?');
+ // v78: global data-freshness in the header ? is the feed live? (was buried in System Health)
+ const _age=((d.risk_intelligence||{}).health||{}).heartbeat_age_secs; const _fresh=(_age==null)?'':' ? feed '+(_age<=120?'?':'?')+' '+_age+'s';
+ set('serverTime',(d.server_time||'?')+_fresh); set('dashboardRefresh','Dashboard refreshed '+new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'})); set('productLine',`${cfg.SPOT_PRODUCT_ID||'BTC-USDC'} ? ${cfg.PERP_PRODUCT_ID||'BIP-20DEC30-CDE'}`);
  const es=d.engine_state||{}, xp=es.exchange_position||{}, fp=(d.futures_positions&&d.futures_positions[0])||{};
  const hbState=String(hb.state||'UNKNOWN').toUpperCase();
  const botLoopError = hbState==='ERROR';
- const botLabel = 'BOT '+(hb.health||'—')+(botLoopError?' · LOOP ERROR':'');
+ const botLabel = 'BOT '+(hb.health||'?')+(botLoopError?' ? LOOP ERROR':'');
  pill('botHealth', botLabel, botLoopError?'bad':(hb.color==='good'?'good':hb.color==='warn'?'warn':'bad'));
  const posSide=(xp.side||fp.side||'FLAT'); const posContracts=(xp.contracts ?? fp.contracts ?? 0);
  pill('botState', posSide==='FLAT'?'POSITION FLAT':`POSITION ${posSide} ${posContracts}`, posSide==='FLAT'?'good':'warn');
- const macroLabel=(mac.regime||'MACRO')+' · '+(mac.gate_open?'MACRO OPEN':'MACRO BLOCK');
+ const macroLabel=(mac.regime||'MACRO')+' ? '+(mac.gate_open?'MACRO OPEN':'MACRO BLOCK');
  pill('macroPill', macroLabel, mac.gate_open===true?'good':mac.regime==='UNKNOWN'?'warn':'bad');
- pill('sessionPill',pm.session_open===false?'EXCHANGE CLOSED':pm.session_open===true?'EXCHANGE OPEN':'EXCHANGE —',pm.session_open===false?'warn':'good');
- const larryTop=d.larry_trade_accounting||{}; const cleanTopPnl=Number(larryTop.net_total_pnl_usd||0); const cleanTopReturn=(c.baseline_set&&c.starting_combined_capital)?(cleanTopPnl/c.starting_combined_capital*100):null; set('startingCapital',usd(c.starting_combined_capital)); set('baselineSource',(c.baseline_set?('Source: '+(c.baseline_source||'set')+(c.started_at?' · '+c.started_at:'')):'Not set — use /api/set_capital_baseline')); set('currentCapital',usd((c.starting_combined_capital||0)+cleanTopPnl)); set('currentCapitalMini',`Baseline ${usd(c.starting_combined_capital)} + Larry total P&L ${usd(cleanTopPnl)}`); set('netPnl',c.baseline_set?usd(cleanTopPnl):'Baseline not set'); setClass('netPnl','val '+(c.baseline_set?cls(cleanTopPnl):'warn')); set('netReturn',(c.baseline_set&&cleanTopReturn!=null)?pct(cleanTopReturn):'Baseline not set'); setClass('netReturn','val '+(c.baseline_set?cls(cleanTopReturn):'warn'));
- set('spotValue',usd(sb.SPOT_TREASURY_VALUE)); set('spotUsd',usd(sb.USD)); set('spotUsdc',usd(sb.USDC)); set('spotBtcUsd',usd(sb.BTC_USD_VALUE)); set('spotBtcAmt',num(sb.BTC,8)+' BTC'); set('spotAccountCount',(sb.raw_count??'—')); set('spotSource',sb.error?('Source: '+(sb.source||'—')+' · '+sb.error):('Source: '+(sb.source||'—')));
+ pill('sessionPill',pm.session_open===false?'EXCHANGE CLOSED':pm.session_open===true?'EXCHANGE OPEN':'EXCHANGE ?',pm.session_open===false?'warn':'good');
+ const larryTop=d.larry_trade_accounting||{}; const cleanTopPnl=Number(larryTop.net_total_pnl_usd||0); const cleanTopReturn=(c.baseline_set&&c.starting_combined_capital)?(cleanTopPnl/c.starting_combined_capital*100):null; set('startingCapital',usd(c.starting_combined_capital)); set('baselineSource',(c.baseline_set?('Source: '+(c.baseline_source||'set')+(c.started_at?' ? '+c.started_at:'')):'Not set ? use /api/set_capital_baseline')); set('currentCapital',usd((c.starting_combined_capital||0)+cleanTopPnl)); set('currentCapitalMini',`Baseline ${usd(c.starting_combined_capital)} + Larry total P&L ${usd(cleanTopPnl)}`); set('netPnl',c.baseline_set?usd(cleanTopPnl):'Baseline not set'); setClass('netPnl','val '+(c.baseline_set?cls(cleanTopPnl):'warn')); set('netReturn',(c.baseline_set&&cleanTopReturn!=null)?pct(cleanTopReturn):'Baseline not set'); setClass('netReturn','val '+(c.baseline_set?cls(cleanTopReturn):'warn'));
+ set('spotValue',usd(sb.SPOT_TREASURY_VALUE)); set('spotUsd',usd(sb.USD)); set('spotUsdc',usd(sb.USDC)); set('spotBtcUsd',usd(sb.BTC_USD_VALUE)); set('spotBtcAmt',num(sb.BTC,8)+' BTC'); set('spotAccountCount',(sb.raw_count??'?')); set('spotSource',sb.error?('Source: '+(sb.source||'?')+' ? '+sb.error):('Source: '+(sb.source||'?')));
  set('futEquity',usd(fb.total_usd_balance)); set('availMargin',usd(fb.available_margin)); set('buyingPower',usd(fb.futures_buying_power)); set('initMargin',usd(fb.initial_margin)); set('liqBuffer',usd(fb.liquidation_buffer_amount));
- set('bookAvg',pnl.book_avg_entry_price?('$'+num(pnl.book_avg_entry_price,2)):'—'); set('bookContracts',pnl.book_contracts!=null?num(pnl.book_contracts,0):'—'); set('bookUnr',usd(pnl.book_unrealized_pnl)); setClass('bookUnr','v '+cls(pnl.book_unrealized_pnl)); set('realizedReset',usd(pnl.realized_since_reset)); setClass('realizedReset','v '+cls(pnl.realized_since_reset)); set('feesReset',usd(pnl.fees_since_reset)); setClass('feesReset','v '+(pnl.fees_since_reset>0?'bad':'')); set('netBookImpact',usd(pnl.net_book_impact)); setClass('netBookImpact','v '+cls(pnl.net_book_impact)); set('tradePnlNote',pnl.method_note||'—'); set('fillCount',(pnl.new_fill_count||0)+' fills'); set('ignoredFillCount',(pnl.ignored_before_tracking_start||0)+' ignored');
+ set('bookAvg',pnl.book_avg_entry_price?('$'+num(pnl.book_avg_entry_price,2)):'?'); set('bookContracts',pnl.book_contracts!=null?num(pnl.book_contracts,0):'?'); set('bookUnr',usd(pnl.book_unrealized_pnl)); setClass('bookUnr','v '+cls(pnl.book_unrealized_pnl)); set('realizedReset',usd(pnl.realized_since_reset)); setClass('realizedReset','v '+cls(pnl.realized_since_reset)); set('feesReset',usd(pnl.fees_since_reset)); setClass('feesReset','v '+(pnl.fees_since_reset>0?'bad':'')); set('netBookImpact',usd(pnl.net_book_impact)); setClass('netBookImpact','v '+cls(pnl.net_book_impact)); set('tradePnlNote',pnl.method_note||'?'); set('fillCount',(pnl.new_fill_count||0)+' fills'); set('ignoredFillCount',(pnl.ignored_before_tracking_start||0)+' ignored');
  renderSpotToggleStatus(cfg); initTradeMapControls(); renderPerformanceAnalytics(d); renderTradeMap(d); renderLarryAccounting(d); renderSignals(d.signals); renderBTCTriggerMap(d); renderV12Transparency(d); renderRiskIntelligence(d); renderSignalLifecycle(d); renderLarryMindset(d); renderEntryDiagnostics(d); renderKillSwitch(d.halt_state || (d.engine_state&&d.engine_state.kill_switch) || {}); renderPerpMonitor(perpMon,d); renderPositionRisk(d.position_risk); renderIAF(d.iaf_engine); renderPortfolio(d.portfolio_overlay); renderReconciler(d.position_reconciler); renderHistory(d.signal_history); renderMacro(mac,d.risk_gate); renderEquityCurve(d);
- // v76 fix: this note previously said "Risk gate status loading…" forever -- no code ever populated it.
- const _rg=d.risk_gate||{}; set('larryRiskGateNote', _rg.entries_allowed===false ? ((_rg.headline||'Risk gate blocked')+' — '+(_rg.reason||'see entry diagnostics')) : ('Risk gate open — daily stop hits '+(_rg.daily_stop_hits??0)+', loss streak '+(_rg.loss_streak??0)+'.'));
- set('atrStop',(cfg.ATR_STOP_MULTIPLIER||1.5)+'x ATR'); set('tslAct',pct((cfg.TSL_ACTIVATION_PCT||0)*100)); set('tslTrail',pct((cfg.TSL_TRAIL_PCT||0)*100)); set('configSource',cfg.CONFIG_SOURCE||'—'); setControlValues(cfg);
+ // v76 fix: this note previously said "Risk gate status loading?" forever -- no code ever populated it.
+ const _rg=d.risk_gate||{}; set('larryRiskGateNote', _rg.entries_allowed===false ? ((_rg.headline||'Risk gate blocked')+' ? '+(_rg.reason||'see entry diagnostics')) : ('Risk gate open ? daily stop hits '+(_rg.daily_stop_hits??0)+', loss streak '+(_rg.loss_streak??0)+'.'));
+ set('atrStop',(cfg.ATR_STOP_MULTIPLIER||1.5)+'x ATR'); set('tslAct',pct((cfg.TSL_ACTIVATION_PCT||0)*100)); set('tslTrail',pct((cfg.TSL_TRAIL_PCT||0)*100)); set('configSource',cfg.CONFIG_SOURCE||'?'); setControlValues(cfg);
  const pos=d.futures_positions||[]; $('perpPosBody').innerHTML=pos.length?pos.map(p=>`<tr><td class="${p.side==='LONG'?'good':'bad'}">${p.side}</td><td>${num(p.contracts,0)}</td><td>${num(p.btc_exposure,4)} BTC</td><td>$${num(p.avg_entry_price,2)}</td><td>$${num(p.current_price,2)}</td><td class="${cls(p.book_unrealized_pnl ?? p.exchange_unrealized_pnl)}">${usd(p.book_unrealized_pnl ?? p.exchange_unrealized_pnl)}</td><td>${p.cost_basis_source||'coinbase_api'}</td></tr>`).join(''):'<tr><td colspan="7" class="muted">No open futures position</td></tr>';
  // v60: deprecated Perp Strategy Stack and Spot Entry Ladder cards removed from the main mobile view.
  // Current live exposure is shown only from Coinbase live futures_positions / exchange_position.
  // Spot trading is disabled and spot ladder diagnostics are intentionally hidden to avoid stale/empty panels.
  const cleanBookValue = `${num(pnl.book_contracts||0,0)} contracts @ $${num(pnl.book_avg_entry_price,2)}`;
- $('acctBody').innerHTML=`<tr><td>Spot Treasury</td><td>${usd(sb.SPOT_TREASURY_VALUE)}</td><td>—</td><td>${usd(sb.BTC_USD_VALUE)} BTC mark value</td><td>—</td><td>—</td><td>Spot cash/USDC/BTC only</td></tr><tr><td><strong>Clean Internal Perp Book</strong></td><td>${cleanBookValue}</td><td class="${cls(pnl.realized_since_reset)}">${usd(pnl.realized_since_reset)}</td><td class="${cls(pnl.book_unrealized_pnl)}">${usd(pnl.book_unrealized_pnl)}</td><td>Not included unless scoped after reset</td><td>${usd(pnl.fees_since_reset)} since reset</td><td>Clean book = live Coinbase basis + post-reset fills, reconciled to exchange size</td></tr><tr><td><strong>Clean Book Net Impact</strong></td><td>Internal strategy P&L</td><td colspan="4" class="${cls(pnl.net_book_impact)}">${usd(pnl.net_book_impact)}</td><td>Clean realized + clean unrealized - fees since reset</td></tr><tr><td>Clean Top-Line Performance</td><td>Baseline ${usd(c.starting_combined_capital)}</td><td colspan="4" class="${cls(pnl.net_book_impact)}">${usd(pnl.net_book_impact)} / ${pct((c.baseline_set && c.starting_combined_capital)?(pnl.net_book_impact/c.starting_combined_capital*100):null)}</td><td>Clean return excludes Coinbase native daily realized P&L and uses opening book + post-reset activity only</td></tr>`;
+ $('acctBody').innerHTML=`<tr><td>Spot Treasury</td><td>${usd(sb.SPOT_TREASURY_VALUE)}</td><td>?</td><td>${usd(sb.BTC_USD_VALUE)} BTC mark value</td><td>?</td><td>?</td><td>Spot cash/USDC/BTC only</td></tr><tr><td><strong>Clean Internal Perp Book</strong></td><td>${cleanBookValue}</td><td class="${cls(pnl.realized_since_reset)}">${usd(pnl.realized_since_reset)}</td><td class="${cls(pnl.book_unrealized_pnl)}">${usd(pnl.book_unrealized_pnl)}</td><td>Not included unless scoped after reset</td><td>${usd(pnl.fees_since_reset)} since reset</td><td>Clean book = live Coinbase basis + post-reset fills, reconciled to exchange size</td></tr><tr><td><strong>Clean Book Net Impact</strong></td><td>Internal strategy P&L</td><td colspan="4" class="${cls(pnl.net_book_impact)}">${usd(pnl.net_book_impact)}</td><td>Clean realized + clean unrealized - fees since reset</td></tr><tr><td>Clean Top-Line Performance</td><td>Baseline ${usd(c.starting_combined_capital)}</td><td colspan="4" class="${cls(pnl.net_book_impact)}">${usd(pnl.net_book_impact)} / ${pct((c.baseline_set && c.starting_combined_capital)?(pnl.net_book_impact/c.starting_combined_capital*100):null)}</td><td>Clean return excludes Coinbase native daily realized P&L and uses opening book + post-reset activity only</td></tr>`;
  }catch(e){$('errorBox').style.display='block';$('errorBox').textContent='Frontend error: '+e.message;console.error(e)}}
 refresh(); setInterval(refresh,12000);
 </script></body></html>
 '''
+
+RESEARCH_HTML = r'''
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Larry Research Lab</title><style>
+:root{--bg:#071019;--panel:#0d1924;--line:#1c3345;--text:#edf7ff;--muted:#8aa2b5;--cyan:#65d9ff;--orange:#f7931a;--green:#4ce09b;--red:#ff6470}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 0,#153348 0,transparent 32%),var(--bg);color:var(--text);font:14px/1.45 Inter,system-ui,sans-serif}.app{max-width:1320px;margin:auto;padding:24px}.hero{padding:24px;border:1px solid var(--line);border-radius:22px;background:linear-gradient(135deg,rgba(15,35,49,.95),rgba(8,18,27,.95));box-shadow:0 18px 60px #0007}.top{display:flex;justify-content:space-between;gap:16px;align-items:flex-start}.eyebrow{color:var(--cyan);font-size:12px;font-weight:800;letter-spacing:.16em}.title{font-size:clamp(27px,4vw,48px);font-weight:850;letter-spacing:-.04em;margin:5px 0}.sub,.muted{color:var(--muted)}.actions{display:flex;gap:8px;flex-wrap:wrap}.pill,.btn{border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:var(--text);background:#102331;text-decoration:none;font-weight:750}.pill.safe{color:var(--green);border-color:#24664d}.grid{display:grid;grid-template-columns:repeat(12,1fr);gap:14px;margin-top:14px}.card{grid-column:span 12;padding:18px;border:1px solid var(--line);border-radius:18px;background:rgba(13,25,36,.92);box-shadow:0 12px 35px #0003}.metric{grid-column:span 3}.metric .label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.08em}.metric .value{font-size:25px;font-weight:850;margin-top:4px}.card h2{margin:0 0 13px;font-size:17px}.table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;min-width:720px}th,td{text-align:right;padding:10px;border-bottom:1px solid #192d3c}th:first-child,td:first-child{text-align:left}th{color:var(--muted);font-size:11px;text-transform:uppercase}.pos{color:var(--green)}.neg{color:var(--red)}.status{font-size:11px;font-weight:800;letter-spacing:.06em;padding:4px 7px;border-radius:999px;background:#173144;color:var(--cyan)}.hyp{display:grid;grid-template-columns:1.1fr 2fr auto;gap:12px;padding:12px 0;border-bottom:1px solid #192d3c}.warning{border-left:3px solid var(--orange);padding:11px 13px;background:#241b0f;color:#ffd69d;border-radius:8px;margin-top:12px}.bars{display:flex;align-items:flex-end;gap:10px;height:155px;padding-top:15px}.bar-wrap{flex:1;text-align:center;color:var(--muted);font-size:11px}.bar{min-height:3px;border-radius:6px 6px 2px 2px;background:linear-gradient(#65d9ff,#286b91);margin-bottom:6px}.bar.neg{background:linear-gradient(#ff6470,#8d2937)}
+@media(max-width:760px){.app{padding:12px}.top{display:block}.actions{margin-top:15px}.metric{grid-column:span 6}.hyp{grid-template-columns:1fr}.title{font-size:31px}}@media(max-width:430px){.metric{grid-column:span 12}}
+</style></head><body><div class="app">
+<section class="hero"><div class="top"><div><div class="eyebrow">LARRY INTELLIGENCE</div><div class="title">Crypto Research Lab</div><div class="sub">Testing cross-asset clues around Bitcoin ? without touching the live trading engine.</div></div><div class="actions"><span class="pill safe">RESEARCH ONLY</span><a class="pill" href="/">? Command Center</a></div></div><div class="warning" id="notice">Loading CoinGecko research history?</div></section>
+<main class="grid"><section class="card metric"><div class="label">Observations</div><div class="value" id="samples">?</div><div class="muted" id="sampleNote">Hourly snapshots</div></section><section class="card metric"><div class="label">Alt breadth (24h)</div><div class="value" id="breadth">?</div><div class="muted">Share of tracked risk assets positive</div></section><section class="card metric"><div class="label">Stablecoin base</div><div class="value" id="stable">?</div><div class="muted">USDT + USDC market cap</div></section><section class="card metric"><div class="label">Last observation</div><div class="value" id="age">?</div><div class="muted" id="timestamp">?</div></section>
+<section class="card"><h2>Market Pulse <span class="status">COINGECKO</span></h2><div class="table-wrap"><table><thead><tr><th>Asset</th><th>Price</th><th>1h</th><th>24h</th><th>7d</th><th>24h Volume</th><th>Market Cap</th></tr></thead><tbody id="assets"></tbody></table></div></section>
+<section class="card" style="grid-column:span 5"><h2>24-hour relative move</h2><div class="bars" id="bars"></div></section><section class="card" style="grid-column:span 7"><h2>Bitcoin relationship monitor</h2><div class="table-wrap"><table><thead><tr><th>Asset</th><th>24h</th><th>7d</th><th>30d</th><th>Best alt lead</th><th>Evidence</th></tr></thead><tbody id="corr"></tbody></table></div><div class="muted" style="margin-top:10px">Correlations use hourly log returns. ?Alt lead? compares an altcoin move with a later BTC move over lags of 1?6 hours; it is exploratory, not predictive proof.</div></section>
+<section class="card"><h2>Hypothesis Library</h2><div class="hyp"><strong>ETH/BTC risk appetite</strong><span class="muted">Does Ethereum strength or weakness precede Bitcoin direction or volatility?</span><span class="status">COLLECTING</span></div><div class="hyp"><strong>Broad altcoin breadth</strong><span class="muted">Does participation across ETH, SOL, XRP, BNB and DOGE foreshadow the size of BTC moves?</span><span class="status">COLLECTING</span></div><div class="hyp"><strong>Stablecoin liquidity</strong><span class="muted">Do changes in the USDT + USDC capital base provide a useful medium-term liquidity regime?</span><span class="status">COLLECTING</span></div><div class="hyp"><strong>SOL / speculative impulse</strong><span class="muted">Can higher-beta assets provide an early risk-on or risk-off temperature reading?</span><span class="status">EXPLORATORY</span></div><div class="hyp"><strong>Negative results</strong><span class="muted">Signals that fail out-of-sample remain documented so Larry does not repeatedly rediscover noise.</span><span class="status">REQUIRED</span></div></section>
+</main></div><script>
+const $=id=>document.getElementById(id), n=(x,d=2)=>x==null?'?':Number(x).toLocaleString('en-US',{maximumFractionDigits:d}), money=x=>x==null?'?':(x>=1e9?'$'+n(x/1e9,1)+'B':x>=1e6?'$'+n(x/1e6,1)+'M':'$'+n(x,2)), pct=x=>x==null?'?':n(x,2)+'%', cls=x=>Number(x)>=0?'pos':'neg', corr=x=>x==null?'?':Number(x).toFixed(2);
+async function refresh(){try{const r=await fetch('/api/research?ts='+Date.now(),{cache:'no-store'}),d=await r.json();const latest=d.latest||{},a=latest.assets||{};$('samples').textContent=n(d.sample_count,0);$('sampleNote').textContent=(d.sample_count<48?'Early sample ? ':'')+'hourly snapshots';$('breadth').textContent=pct(d.breadth_24h_pct);$('stable').textContent=money(d.stablecoin_market_cap_usd);const t=latest.timestamp?new Date(latest.timestamp):null;$('age').textContent=t?Math.max(0,Math.round((Date.now()-t)/60000))+'m':'?';$('timestamp').textContent=t?t.toLocaleString():'No sample yet';$('notice').textContent=d.fetch_error?'Latest refresh failed; showing retained data. '+d.fetch_error:(d.sample_count<48?'Collecting baseline: correlation labels are withheld until at least 48 hourly observations.':'Research feed healthy. Results remain isolated from Larry?s execution logic.');
+$('assets').innerHTML=Object.values(a).map(x=>`<tr><td><strong>${x.symbol}</strong></td><td>${money(x.price)}</td><td class="${cls(x.change_1h_pct)}">${pct(x.change_1h_pct)}</td><td class="${cls(x.change_24h_pct)}">${pct(x.change_24h_pct)}</td><td class="${cls(x.change_7d_pct)}">${pct(x.change_7d_pct)}</td><td>${money(x.volume_24h)}</td><td>${money(x.market_cap)}</td></tr>`).join('')||'<tr><td colspan="7">No data yet</td></tr>';
+const risks=Object.values(a).filter(x=>!['USDT','USDC'].includes(x.symbol)),max=Math.max(1,...risks.map(x=>Math.abs(x.change_24h_pct||0)));$('bars').innerHTML=risks.map(x=>`<div class="bar-wrap"><div class="bar ${Number(x.change_24h_pct)<0?'neg':''}" style="height:${Math.max(3,Math.abs(x.change_24h_pct||0)/max*115)}px"></div><strong>${x.symbol}</strong><br>${pct(x.change_24h_pct)}</div>`).join('');
+$('corr').innerHTML=(d.correlations||[]).map(x=>{const enough=x.sample_count>=48,lead=x.best_alt_lead||{};return `<tr><td><strong>${x.symbol}</strong></td><td>${enough?corr(x.correlation['24h']):'collecting'}</td><td>${x.sample_count>=168?corr(x.correlation['7d']):'collecting'}</td><td>${x.sample_count>=720?corr(x.correlation['30d']):'collecting'}</td><td>${x.sample_count>=168&&lead.correlation!=null?corr(lead.correlation)+' @ '+lead.lag_hours+'h':'collecting'}</td><td>${n(x.sample_count,0)} hourly returns</td></tr>`}).join('');}catch(e){$('notice').textContent='Research feed unavailable: '+e.message}}
+refresh();setInterval(refresh,300000);
+</script></body></html>
+'''
+
+
+@app.route("/api/research")
+def api_research():
+    """Read-only CoinGecko research. This endpoint has no trading-engine dependency."""
+    data = load_coingecko_research(refresh_if_due=True)
+    return jsonify(data), (200 if data.get("ok") else 503)
+
+
+@app.route("/research")
+def research():
+    return render_template_string(RESEARCH_HTML)
+
 
 @app.route("/")
 def index():
