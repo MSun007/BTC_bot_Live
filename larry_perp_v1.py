@@ -298,8 +298,10 @@ STREAK_PAUSE_MINUTES = float(os.getenv("STREAK_PAUSE_MINUTES", str(STREAK_PAUSE_
 CANDLE_GRANULARITY = os.getenv("CANDLE_GRANULARITY", "ONE_HOUR")
 CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "300"))
 LOOP_SECONDS = int(os.getenv("LOOP_SECONDS", "60"))
-GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "20"))
-GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "50"))
+GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "30"))
+# Disabled by default. Production uses many separate gcloud CLI calls per cycle;
+# a shared cap falsely treated normal aggregate I/O as an outage.
+GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "0"))
 GCS_READ_ATTEMPTS = int(os.getenv("GCS_READ_ATTEMPTS", "2"))
 GCS_WRITE_ATTEMPTS = int(os.getenv("GCS_WRITE_ATTEMPTS", "3"))
 HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "60"))
@@ -616,7 +618,8 @@ class GCS:
         Only time spent inside GCS commands and their retry backoff is charged.
         Coinbase calls and strategy evaluation must not consume storage budget.
         """
-        self._cycle_io_remaining_seconds = max(1.0, float(seconds))
+        value = float(seconds)
+        self._cycle_io_remaining_seconds = max(1.0, value) if value > 0 else None
 
     def _remaining_cycle_budget(self) -> Optional[float]:
         return self._cycle_io_remaining_seconds
@@ -1274,7 +1277,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v38_resilient_gcs_startup",
+        "version": "larry_perp_v39_stable_gcs_retry",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -4254,7 +4257,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v38_resilient_gcs_startup",
+        "version": "larry_perp_v39_stable_gcs_retry",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4810,7 +4813,7 @@ def main() -> None:
             try:
                 # Write a DOWN/ERROR-ish heartbeat while service is still alive.
                 gcs = GCS(BUCKET_NAME)
-                gcs.begin_cycle_budget(min(10.0, GCS_CYCLE_IO_BUDGET_SECONDS))
+                gcs.begin_cycle_budget(10.0)
                 err_payload = {"ts": iso_utc(), "status": "ERROR", "state": "ERROR", "error": str(e), "bot": "Larry Perp v12 Unified"}
                 gcs.write_json(UNIFIED_HEARTBEAT_BLOB, err_payload)
                 gcs.write_json(LEGACY_HEARTBEAT_BLOB, err_payload)
