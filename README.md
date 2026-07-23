@@ -5,11 +5,8 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v34_authority_cleanup
+larry_perp_v35_fresh_setup_guard
 ```
-
-The tested, not-yet-deployed successor is `larry_perp_v35_fresh_setup_guard`.
-It must not be deployed until Coinbase reports Larry flat.
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
 
@@ -368,27 +365,20 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-The v34 authority-cleanup release makes Max Conviction the sole absolute size control, removes inactive configuration noise, tightens ownership recovery and gives the dashboard an explicit position-authority status.
-
-Production deployment (July 22, 2026):
-
-- Base release commit: `a03ad05`
-- Engine metadata correction: `52e0ce4`
-- Dashboard authority-label correction: `b168b5c`
-- Cloud Run dashboard revision: `perp-bot-dashboard-00129-qtj` (100% traffic)
-- Engine service: `larry-perp.service` active on `btc-perp-bot`
-- Engine state: `larry_perp_v34_authority_cleanup`
-
-## Staged v35 release
-
-The v35 fresh-setup guard is intentionally staged but not deployed while Larry
-has an open position. It preserves the v34 ownership, re-anchoring, ATR,
-profit-taking and adaptive-defence improvements while fixing the new churn path
+The v35 fresh-setup guard preserves the v34 ownership, re-anchoring, ATR,
+profit-taking and adaptive-defence improvements while fixing the churn path
 introduced by the time-only adaptive re-entry cooldown.
 
-- Engine state after deployment: `larry_perp_v35_fresh_setup_guard`
+Production deployment (July 23, 2026):
+
+- Release commit: `4c9a02a`
+- Cloud Run dashboard revision: `perp-bot-dashboard-00135-tbk` (100% traffic)
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v35_fresh_setup_guard`
+- Exchange position at deployment and verification: `FLAT`
 - Same-side signal clear: mandatory
 - Recovery evidence: mandatory
 - New post-clear phantom setup: mandatory
 - First retry sizing: probe only
-- Deployment condition: Coinbase position is flat
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v35_20260723_1024`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v35_20260723_1024.json`
