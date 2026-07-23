@@ -111,6 +111,51 @@ class AdaptiveRiskTests(unittest.TestCase):
             "persisted_bot_management_continuity_not_proven",
         )
 
+    def test_adaptive_exit_requires_signal_clear_before_same_side_reentry(self):
+        state = larry.default_engine_state()
+        larry.start_adaptive_reentry_guard(state, "LONG", "ADAPTIVE_DEFENSE_EXIT_LONG")
+        still_long = larry.SignalSnapshot(95, 25, .1, 96, 100, 104, 2, 1.3, 4, 0, {}, {})
+        guard = larry.update_adaptive_reentry_guard(
+            state, still_long, {"structure": "BEARISH_LH_LL"}
+        )
+        self.assertFalse(guard["signal_cleared"])
+        allowed, reason = larry.adaptive_reentry_allows(state, "LONG", larry.iso_utc())
+        self.assertFalse(allowed)
+        self.assertIn("has not cleared", reason)
+
+    def test_pre_clear_phantom_cannot_be_reused_as_fresh_setup(self):
+        state = larry.default_engine_state()
+        guard = larry.start_adaptive_reentry_guard(
+            state, "LONG", "ADAPTIVE_DEFENSE_EXIT_LONG"
+        )
+        old_setup_time = guard["started_at"]
+        cleared = larry.SignalSnapshot(101, 50, .5, 96, 100, 104, 2, .8, 0, 0, {}, {})
+        larry.update_adaptive_reentry_guard(
+            state, cleared, {"structure": "RANGE_OR_TRANSITION"}
+        )
+        allowed, reason = larry.adaptive_reentry_allows(state, "LONG", old_setup_time)
+        self.assertFalse(allowed)
+        self.assertIn("new post-clear setup", reason)
+
+    def test_new_post_clear_setup_is_eligible_and_probe_capped(self):
+        state = larry.default_engine_state()
+        larry.start_adaptive_reentry_guard(state, "LONG", "ADAPTIVE_DEFENSE_EXIT_LONG")
+        cleared = larry.SignalSnapshot(101, 50, .5, 96, 100, 104, 2, .8, 0, 0, {}, {})
+        guard = larry.update_adaptive_reentry_guard(
+            state, cleared, {"structure": "RANGE_OR_TRANSITION"}
+        )
+        cleared_at = larry.parse_dt(guard["signal_cleared_at"])
+        fresh_at = (cleared_at + larry.timedelta(seconds=1)).isoformat()
+        allowed, _ = larry.adaptive_reentry_allows(state, "LONG", fresh_at)
+        self.assertTrue(allowed)
+        self.assertTrue(guard["first_reentry_probe_only"])
+
+    def test_opposite_side_is_not_blocked_by_same_side_guard(self):
+        state = larry.default_engine_state()
+        larry.start_adaptive_reentry_guard(state, "LONG", "ADAPTIVE_DEFENSE_EXIT_LONG")
+        allowed, _ = larry.adaptive_reentry_allows(state, "SHORT", None)
+        self.assertTrue(allowed)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -8,6 +8,9 @@ The current production engine is:
 larry_perp_v34_authority_cleanup
 ```
 
+The tested, not-yet-deployed successor is `larry_perp_v35_fresh_setup_guard`.
+It must not be deployed until Coinbase reports Larry flat.
+
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
 
 ## System overview
@@ -109,7 +112,18 @@ Current live actions:
 | 85+ for two consecutive cycles | Exit the position |
 | Firm ATR stop crossed | Exit immediately |
 
-An adaptive reduction or exit creates a 15-minute re-entry cooldown. Confirmation cycles and cooldowns reduce the risk of repeatedly reacting to ordinary crypto noise.
+An adaptive reduction or exit creates a 15-minute minimum re-entry cooldown.
+Beginning with v35, elapsed time is not sufficient to authorize the same side
+again. Larry latches a same-side re-entry guard that requires:
+
+1. The old directional score to fall to the signal-cancel threshold.
+2. Structure to stop being adverse or price to reclaim the Bollinger middle band.
+3. A new phantom setup whose arm timestamp is later than the signal-clear event.
+4. The first qualified retry to use probe size only.
+
+This prevents a persistent oversold or overbought reading from being recycled as
+a supposedly fresh setup every time the cooldown expires. Opposite-side setups
+remain eligible under their normal gates.
 
 Adaptive defence can only reduce or close an existing position. It cannot independently open or reverse a trade.
 
@@ -239,7 +253,7 @@ Funding can block or reduce position size when carrying cost becomes adverse. Th
 
 The production defaults live in `strategy_config.json`. The bot merges the stored GCS configuration over code defaults each cycle.
 
-Key v34 settings:
+Key v35 settings:
 
 ```json
 {
@@ -252,6 +266,9 @@ Key v34 settings:
   "ADAPTIVE_EXIT_SCORE": 85,
   "ADAPTIVE_CONFIRM_CYCLES": 2,
   "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": 15,
+  "ADAPTIVE_FRESH_SETUP_REQUIRED": true,
+  "ADAPTIVE_REENTRY_PROBE_ONLY": true,
+  "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND": true,
   "SWING_PIVOT_ENABLED": true,
   "SWING_PIVOT_LEFT_BARS": 2,
   "SWING_PIVOT_RIGHT_BARS": 2,
@@ -295,6 +312,10 @@ The current tests verify:
 - Max Conviction is the sole absolute contract clamp
 - Position management requires a matching exchange ownership fingerprint
 - Ledger recovery fails closed without prior bot-managed continuity
+- Adaptive exits require the old same-side signal to clear
+- Pre-clear phantom setups cannot be reused after recovery
+- The first fresh same-side retry is probe-only
+- Opposite-side setups are not blocked by the same-side guard
 
 Also run syntax checks before deployment:
 
@@ -357,3 +378,17 @@ Production deployment (July 22, 2026):
 - Cloud Run dashboard revision: `perp-bot-dashboard-00129-qtj` (100% traffic)
 - Engine service: `larry-perp.service` active on `btc-perp-bot`
 - Engine state: `larry_perp_v34_authority_cleanup`
+
+## Staged v35 release
+
+The v35 fresh-setup guard is intentionally staged but not deployed while Larry
+has an open position. It preserves the v34 ownership, re-anchoring, ATR,
+profit-taking and adaptive-defence improvements while fixing the new churn path
+introduced by the time-only adaptive re-entry cooldown.
+
+- Engine state after deployment: `larry_perp_v35_fresh_setup_guard`
+- Same-side signal clear: mandatory
+- Recovery evidence: mandatory
+- New post-clear phantom setup: mandatory
+- First retry sizing: probe only
+- Deployment condition: Coinbase position is flat

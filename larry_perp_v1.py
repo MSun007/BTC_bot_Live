@@ -274,6 +274,11 @@ ADAPTIVE_REDUCE_SCORE = int(os.getenv("ADAPTIVE_REDUCE_SCORE", "65"))
 ADAPTIVE_EXIT_SCORE = int(os.getenv("ADAPTIVE_EXIT_SCORE", "85"))
 ADAPTIVE_CONFIRM_CYCLES = int(os.getenv("ADAPTIVE_CONFIRM_CYCLES", "2"))
 ADAPTIVE_REENTRY_COOLDOWN_MINUTES = int(os.getenv("ADAPTIVE_REENTRY_COOLDOWN_MINUTES", "15"))
+ADAPTIVE_FRESH_SETUP_REQUIRED = os.getenv("ADAPTIVE_FRESH_SETUP_REQUIRED", "true").lower() in ("1", "true", "yes")
+ADAPTIVE_REENTRY_PROBE_ONLY = os.getenv("ADAPTIVE_REENTRY_PROBE_ONLY", "true").lower() in ("1", "true", "yes")
+ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND = os.getenv(
+    "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "true"
+).lower() in ("1", "true", "yes")
 SWING_PIVOT_ENABLED = os.getenv("SWING_PIVOT_ENABLED", "true").lower() in ("1", "true", "yes")
 SWING_PIVOT_LEFT_BARS = int(os.getenv("SWING_PIVOT_LEFT_BARS", "2"))
 SWING_PIVOT_RIGHT_BARS = int(os.getenv("SWING_PIVOT_RIGHT_BARS", "2"))
@@ -404,6 +409,9 @@ DEFAULT_STRATEGY_CONFIG = {
     "ADAPTIVE_EXIT_SCORE": ADAPTIVE_EXIT_SCORE,
     "ADAPTIVE_CONFIRM_CYCLES": ADAPTIVE_CONFIRM_CYCLES,
     "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": ADAPTIVE_REENTRY_COOLDOWN_MINUTES,
+    "ADAPTIVE_FRESH_SETUP_REQUIRED": ADAPTIVE_FRESH_SETUP_REQUIRED,
+    "ADAPTIVE_REENTRY_PROBE_ONLY": ADAPTIVE_REENTRY_PROBE_ONLY,
+    "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND": ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND,
     "SWING_PIVOT_ENABLED": SWING_PIVOT_ENABLED,
     "SWING_PIVOT_LEFT_BARS": SWING_PIVOT_LEFT_BARS,
     "SWING_PIVOT_RIGHT_BARS": SWING_PIVOT_RIGHT_BARS,
@@ -804,7 +812,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
     # derives the effective pause length from STREAK_PAUSE_HOURS (single source of truth,
     # see v30 fix note there) so editing only the hours field on the dashboard takes effect.
     float_keys += ["STREAK_PAUSE_HOURS", "STREAK_PAUSE_MINUTES"]
-    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE"]
+    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE"]
     for k in float_keys:
         cfg[k] = safe_float(cfg.get(k), safe_float(DEFAULT_STRATEGY_CONFIG.get(k), 0.0))
     for k in int_keys:
@@ -823,7 +831,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     """
     global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
-    global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
+    global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES
     global MIN_ENTRY_COOLDOWN_SECONDS, SPOT_TRANCHE_TARGETS_PCT, MIN_FUTURES_EQUITY_BUFFER_USD, MAX_EFFECTIVE_LEVERAGE
     global RSI_LONG_MAX, RSI_SHORT_MIN, STOCH_LONG_MAX, STOCH_SHORT_MIN, VOL_SPIKE_MIN
@@ -887,6 +895,12 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     ADAPTIVE_EXIT_SCORE = max(ADAPTIVE_REDUCE_SCORE, min(100, safe_int(cfg.get("ADAPTIVE_EXIT_SCORE"), ADAPTIVE_EXIT_SCORE)))
     ADAPTIVE_CONFIRM_CYCLES = max(1, safe_int(cfg.get("ADAPTIVE_CONFIRM_CYCLES"), ADAPTIVE_CONFIRM_CYCLES))
     ADAPTIVE_REENTRY_COOLDOWN_MINUTES = max(1, safe_int(cfg.get("ADAPTIVE_REENTRY_COOLDOWN_MINUTES"), ADAPTIVE_REENTRY_COOLDOWN_MINUTES))
+    ADAPTIVE_FRESH_SETUP_REQUIRED = _bool_from_any(cfg.get("ADAPTIVE_FRESH_SETUP_REQUIRED"), ADAPTIVE_FRESH_SETUP_REQUIRED)
+    ADAPTIVE_REENTRY_PROBE_ONLY = _bool_from_any(cfg.get("ADAPTIVE_REENTRY_PROBE_ONLY"), ADAPTIVE_REENTRY_PROBE_ONLY)
+    ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND = _bool_from_any(
+        cfg.get("ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND"),
+        ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND,
+    )
     SWING_PIVOT_ENABLED = _bool_from_any(cfg.get("SWING_PIVOT_ENABLED"), SWING_PIVOT_ENABLED)
     SWING_PIVOT_LEFT_BARS = max(1, safe_int(cfg.get("SWING_PIVOT_LEFT_BARS"), SWING_PIVOT_LEFT_BARS))
     SWING_PIVOT_RIGHT_BARS = max(1, safe_int(cfg.get("SWING_PIVOT_RIGHT_BARS"), SWING_PIVOT_RIGHT_BARS))
@@ -1202,7 +1216,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v34_authority_cleanup",
+        "version": "larry_perp_v35_fresh_setup_guard",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -1244,6 +1258,12 @@ def default_engine_state() -> Dict[str, Any]:
             "adaptive_defense": {},
         },
         "market_structure": {},
+        "adaptive_reentry_guard": {
+            "active": False,
+            "side": None,
+            "signal_cleared": False,
+            "recovery_seen": False,
+        },
         "stop_blown": {"active": False, "mode": "SHADOW"},
         "cooldowns": {
             "spot_last_entry_at": None,
@@ -2589,6 +2609,106 @@ def adaptive_defense_snapshot(state: Dict[str, Any], live_pos: Dict[str, Any], s
     return {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": score, "state": action,
             "confirm_cycles": cycles, "required_cycles": ADAPTIVE_CONFIRM_CYCLES,
             "evidence": evidence, "side": side, "evaluated_at": iso_utc()}
+
+
+def start_adaptive_reentry_guard(state: Dict[str, Any], side: str, reason: str) -> Dict[str, Any]:
+    """Latch a same-side block until the old signal disappears and recovery is observed.
+
+    The v33 cooldown was time-only, so a persistent oversold/overbought reading
+    could be treated as a fresh setup as soon as 15 minutes elapsed. This guard
+    restores the older FSM's intended separation between setups: the triggering
+    signal must first clear, then a later setup may arm.
+    """
+    prior_phantom = state.get("phantom") or {}
+    guard = {
+        "active": bool(ADAPTIVE_FRESH_SETUP_REQUIRED),
+        "side": side,
+        "started_at": iso_utc(),
+        "reason": reason,
+        "exited_setup_id": prior_phantom.get("setup_id"),
+        "signal_cleared": False,
+        "signal_cleared_at": None,
+        "recovery_seen": False,
+        "recovery_seen_at": None,
+        "eligible": False,
+        "first_reentry_probe_only": bool(ADAPTIVE_REENTRY_PROBE_ONLY),
+        "note": "Same-side entry/adds blocked until the prior signal clears and recovery is observed.",
+    }
+    state["adaptive_reentry_guard"] = guard
+    return guard
+
+
+def update_adaptive_reentry_guard(state: Dict[str, Any], sig: SignalSnapshot,
+                                  structure: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    guard = state.setdefault("adaptive_reentry_guard", {
+        "active": False, "side": None, "signal_cleared": False, "recovery_seen": False,
+    })
+    if not guard.get("active"):
+        return guard
+    side = str(guard.get("side") or "").upper()
+    score = sig.long_score if side == "LONG" else sig.short_score
+    if not guard.get("signal_cleared") and score <= SIGNAL_CANCEL_SCORE:
+        guard["signal_cleared"] = True
+        guard["signal_cleared_at"] = iso_utc()
+
+    structure_name = str((structure or {}).get("structure") or "UNCLASSIFIED").upper()
+    supportive_mid = bool(
+        sig.mid_bb and (
+            (side == "LONG" and sig.price >= sig.mid_bb)
+            or (side == "SHORT" and sig.price <= sig.mid_bb)
+        )
+    )
+    non_adverse_structure = (
+        side == "LONG" and structure_name != "BEARISH_LH_LL"
+    ) or (
+        side == "SHORT" and structure_name != "BULLISH_HH_HL"
+    )
+    recovery_now = supportive_mid or non_adverse_structure
+    if guard.get("signal_cleared") and recovery_now and not guard.get("recovery_seen"):
+        guard["recovery_seen"] = True
+        guard["recovery_seen_at"] = iso_utc()
+        guard["recovery_basis"] = "mid_band_reclaim" if supportive_mid else "structure_no_longer_adverse"
+    guard["current_score"] = score
+    guard["current_structure"] = structure_name
+    guard["supportive_mid_band"] = supportive_mid
+    guard["eligible"] = bool(
+        guard.get("signal_cleared")
+        and (
+            guard.get("recovery_seen")
+            or not ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND
+        )
+    )
+    guard["updated_at"] = iso_utc()
+    return guard
+
+
+def adaptive_reentry_allows(state: Dict[str, Any], side: str,
+                            setup_started_at: Any = None) -> Tuple[bool, str]:
+    guard = state.get("adaptive_reentry_guard") or {}
+    if not guard.get("active") or str(guard.get("side") or "").upper() != side.upper():
+        return True, "OK"
+    if not guard.get("signal_cleared"):
+        return False, f"Fresh {side.upper()} setup required: prior signal has not cleared"
+    if ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND and not guard.get("recovery_seen"):
+        return False, f"Fresh {side.upper()} setup required: waiting for structure or mid-band recovery"
+    cleared_at = parse_dt(guard.get("signal_cleared_at"))
+    setup_at = parse_dt(setup_started_at)
+    if not setup_at or (cleared_at and setup_at <= cleared_at):
+        return False, f"Fresh {side.upper()} setup required: waiting for a new post-clear setup"
+    return True, "Fresh setup verified"
+
+
+def resolve_adaptive_reentry_guard(state: Dict[str, Any], side: str, setup_id: Any) -> None:
+    guard = state.get("adaptive_reentry_guard") or {}
+    if not guard.get("active") or str(guard.get("side") or "").upper() != side.upper():
+        return
+    guard.update({
+        "active": False,
+        "eligible": False,
+        "resolved_at": iso_utc(),
+        "resolved_by_setup_id": setup_id,
+        "resolution": "fresh_same_side_probe_executed",
+    })
 
 
 def update_stop_blown_shadow(state: Dict[str, Any], price: float, atr_now: float) -> None:
@@ -4076,7 +4196,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v34_authority_cleanup",
+        "version": "larry_perp_v35_fresh_setup_guard",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4238,6 +4358,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
     # Coinbase positions are monitor-only by default and must not be flattened
     # by Larry.
     controls = update_position_risk_controls(state, live_pos, sig, candles)
+    update_adaptive_reentry_guard(state, sig, state.get("market_structure") or {})
     update_stop_blown_shadow(state, sig.price, sig.atr or 0.0)
     mgmt = live_position_management_status(state, live_pos)
     state["manual_position_status"] = mgmt
@@ -4269,6 +4390,11 @@ def run_once(cb: Any, gcs: GCS) -> None:
         is_tp1 = (exit_reason or "").startswith(("TP1_PARTIAL_", "TP1_LADDER_STEPDOWN_"))
         if last_result.get("ok") and abs(after_signed) < abs(before_signed):
             if (exit_reason or "").startswith("ADAPTIVE_DEFENSE_"):
+                start_adaptive_reentry_guard(
+                    state,
+                    "LONG" if before_signed > 0 else "SHORT",
+                    exit_reason or "ADAPTIVE_DEFENSE",
+                )
                 state.setdefault("risk", {})["pause_until"] = (
                     now_utc() + timedelta(minutes=ADAPTIVE_REENTRY_COOLDOWN_MINUTES)
                 ).isoformat()
@@ -4339,6 +4465,12 @@ def run_once(cb: Any, gcs: GCS) -> None:
             side_ok = (live_signed_for_ext > 0 and sig.price <= ext_target_price) or (live_signed_for_ext < 0 and sig.price >= ext_target_price)
             if live_signed_for_ext != 0 and ext_target_price > 0 and ext_target_contracts > abs(live_signed_for_ext) and side_ok and not ext_done:
                 entries_allowed_ext, reason_ext = risk_allows_entry(state)
+                ext_side = "LONG" if live_signed_for_ext > 0 else "SHORT"
+                # An extension belongs to the pre-exit setup, so it can never
+                # satisfy a guard that explicitly requires a new post-clear setup.
+                fresh_ext_ok, fresh_ext_reason = adaptive_reentry_allows(state, ext_side, None)
+                if entries_allowed_ext and not fresh_ext_ok:
+                    entries_allowed_ext, reason_ext = False, fresh_ext_reason
                 if entries_allowed_ext:
                     target_ext = clamp_target((1 if live_signed_for_ext > 0 else -1) * min(ext_target_contracts, MAX_CONVICTION_CONTRACTS))
                     cd_key_ext = "perp_last_long_entry_at" if live_signed_for_ext > 0 else "perp_last_short_entry_at"
@@ -4393,6 +4525,14 @@ def run_once(cb: Any, gcs: GCS) -> None:
                 _dctx = decision_context(sig, _funding_now, state.get("macro_regime") or {}, safe_int((state.get("last_exchange_position") or {}).get("signed_contracts"), 0))
                 log_phantom_transition(gcs, _ph_before, _ph_after, _dctx)
                 if confirmed:
+                    fresh_ok, fresh_reason = adaptive_reentry_allows(
+                        state, confirmed, (state.get("phantom") or {}).get("armed_at")
+                    )
+                    if not fresh_ok:
+                        reset_phantom_with_reason(state, fresh_reason)
+                        state.setdefault("last_blocked_action", {})["adaptive_reentry"] = fresh_reason
+                        confirmed = None
+                if confirmed:
                     # v12: check the per-direction cooldown, not the merged one.
                     cd_key = "perp_last_long_entry_at" if confirmed == "LONG" else "perp_last_short_entry_at"
                     cd = cooldown_status(state, cd_key)
@@ -4428,6 +4568,18 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         target = core_target_for_signal(live_now["signed_contracts"], confirmed, _score, _funding, _macro_open)
                         if FREEZE_CONFIDENCE_ON_ARM and _ctx.get("target_abs_contracts"):
                             target = clamp_target((+1 if confirmed == "LONG" else -1) * safe_int(_ctx.get("target_abs_contracts"), 0))
+                        _adaptive_guard = state.get("adaptive_reentry_guard") or {}
+                        _guarded_reentry = bool(
+                            _adaptive_guard.get("active")
+                            and str(_adaptive_guard.get("side") or "").upper() == confirmed
+                        )
+                        if _guarded_reentry and ADAPTIVE_REENTRY_PROBE_ONLY:
+                            probe_abs = max(1, min(sizing_ladder_contracts().get("probe", 1), MAX_CONVICTION_CONTRACTS))
+                            target = clamp_target((1 if confirmed == "LONG" else -1) * probe_abs)
+                            sizing_decision["adaptive_reentry_probe_cap"] = True
+                            sizing_decision["target_abs_contracts"] = probe_abs
+                            sizing_decision["final_contracts"] = probe_abs
+                            sizing_decision["reason"] = "fresh_post_adaptive_setup_probe"
                         # v31: resize BEFORE building the plan / progressive-add check so
                         # everything downstream sees the leverage-capped target. A strong
                         # signal now executes at the largest safe size instead of being
@@ -4485,6 +4637,8 @@ def run_once(cb: Any, gcs: GCS) -> None:
                                     mark_cooldown(state, "perp_last_short_entry_at")
                                 sync_bot_managed_position_after_trade(state, last_result, core_reason)
                                 record_progressive_add(state, last_result, sizing_decision)
+                                if _guarded_reentry:
+                                    resolve_adaptive_reentry_guard(state, confirmed, _setup_id)
                             state["phantom"] = default_engine_state()["phantom"]
                         else:
                             state.setdefault("last_blocked_action", {})["perp"] = guard_reason

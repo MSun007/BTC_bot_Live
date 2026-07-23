@@ -1,6 +1,6 @@
 {
-  "CONFIG_VERSION": "v34_authority_cleanup",
-  "CONFIG_NOTE": "v34: Max Conviction is the sole absolute size limit; position management requires signed-size, product, average-entry, and persisted bot-ownership continuity; inactive and duplicate config keys removed.",
+  "CONFIG_VERSION": "v35_fresh_setup_guard",
+  "CONFIG_NOTE": "v35: preserves v34 authority and adaptive protection, but prevents same-side churn after an adaptive exit by requiring the old signal to clear, a genuinely fresh setup, recovery evidence, and probe-only first re-entry.",
   "CONTRACT_SIZE_BTC": 0.01,
   "ATR_PERIOD": 14,
   "ATR_STOP_MULTIPLIER": 1.5,
@@ -79,6 +79,9 @@
   "ADAPTIVE_EXIT_SCORE": 85,
   "ADAPTIVE_CONFIRM_CYCLES": 2,
   "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": 15,
+  "ADAPTIVE_FRESH_SETUP_REQUIRED": true,
+  "ADAPTIVE_REENTRY_PROBE_ONLY": true,
+  "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND": true,
   "SWING_PIVOT_ENABLED": true,
   "SWING_PIVOT_LEFT_BARS": 2,
   "SWING_PIVOT_RIGHT_BARS": 2,

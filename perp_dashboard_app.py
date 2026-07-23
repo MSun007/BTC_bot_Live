@@ -4576,11 +4576,19 @@ function renderLarryMindset(d){
  let tpPct=Number(cfg.TP1_PCT||.0075)*100; if(contracts>=maxN)tpPct=Number(cfg.TP1_FULL_TRIGGER_PCT||.005)*100;else if(contracts>=strong)tpPct=Number(cfg.TP1_STRONG_TRIGGER_PCT||.006)*100;else tpPct=Number(cfg.TP1_PROBE_TRIGGER_PCT||.0075)*100;
  const liveEntry=Number(pr.entry_price||pos.avg_entry_price||0), liveTp=Number(pc.tp1_trigger_price||0); if(hasPosition&&liveEntry&&liveTp)tpPct=Math.abs(liveTp/liveEntry-1)*100;
  const defense=pc.adaptive_defense||{}, ds=Number(defense.score||0), ev=(defense.evidence||[]).map(x=>String(x.factor||'').replaceAll('_',' '));
- set('defenseState',`${String(defense.state||'FLAT').replaceAll('_',' ')} / ${num(ds,0)}/100`); set('defenseEvidence',ev.length?ev.slice(0,2).join(' / '):'No adverse evidence active');
+ const fresh=es.adaptive_reentry_guard||{}, freshSide=String(fresh.side||'').toUpperCase();
+ set('defenseState',`${String(defense.state||'FLAT').replaceAll('_',' ')} / ${num(ds,0)}/100`);
+ set('defenseEvidence',fresh.active
+   ?`${freshSide} re-entry locked · ${fresh.signal_cleared?(fresh.recovery_seen?'fresh setup may arm':'waiting recovery'):'waiting signal clear'}`
+   :(ev.length?ev.slice(0,2).join(' / '):'No adverse evidence active'));
  const db=$('defenseBar'); if(db)db.style.width=Math.max(0,Math.min(100,ds))+'%';
  const reanchor=pc.position_reanchor||{}; set('positionVersion',`Version ${pc.position_version||'--'}${reanchor.verified?' verified':''}`); set('positionAnchor',hasPosition?`Avg ${usd(reanchor.exchange_avg_entry||pr.entry_price)} / ATR ${usd(reanchor.locked_atr)}`:'Exchange average not active');
  const ms=es.market_structure||{}, hi=(ms.last_swing_high||{}).price, lo=(ms.last_swing_low||{}).price; set('pivotStructure',String(ms.structure||'UNCLASSIFIED').replaceAll('_',' ')); set('pivotLevels',`Low ${lo?usd(lo):'--'} / High ${hi?usd(hi):'--'} / shadow`);
- const sb=es.stop_blown||{}, scores=sb.scores||{}; set('stopBlownState',sb.active?`${sb.leader||'OBSERVING'} / SHADOW`:'Inactive / shadow'); set('stopBlownScores',sb.active?`Fish ${num((scores.FISHED||0)*100,0)}% / Save ${num((scores.SAVED||0)*100,0)}% / Extreme ${num((scores.EXTREME||0)*100,0)}%`:'SB1-SB5 observer cannot trade');
+ const sb=es.stop_blown||{}, scores=sb.scores||{};
+ set('stopBlownState',fresh.active?`RE-ENTRY LOCK / ${freshSide}`:(sb.active?`${sb.leader||'OBSERVING'} / SHADOW`:'Inactive / shadow'));
+ set('stopBlownScores',fresh.active
+   ?`Signal ${fresh.signal_cleared?'cleared':'must clear'} · recovery ${fresh.recovery_seen?'seen':'required'} · first retry probe only`
+   :(sb.active?`Fish ${num((scores.FISHED||0)*100,0)}% / Save ${num((scores.SAVED||0)*100,0)}% / Extreme ${num((scores.EXTREME||0)*100,0)}%`:'SB1-SB5 observer cannot trade'));
  const progress=hasPosition?(pr.tsl_active?100:Math.max(0,Math.min(100,tslPct?uplPct/tslPct*100:0))):0;
  const fill=$('mindsetProfitFill'), marker=$('mindsetTpMarker'); if(fill)fill.style.width=progress+'%'; if(marker)marker.style.left=Math.max(0,Math.min(100,tslPct?tpPct/tslPct*100:50))+'%';
  set('mindsetProfitValue',hasPosition?`${uplPct>=0?'+':''}${num(uplPct,2)}% · ${pc.tp1_done?'TP passed':pr.tsl_active?'trail active':'building protection'}`:'Flat / waiting');
