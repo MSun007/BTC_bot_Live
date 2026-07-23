@@ -1,6 +1,6 @@
 {
-  "CONFIG_VERSION": "v39_stable_gcs_retry",
-  "CONFIG_NOTE": "v39: retains bounded critical-read retries and fail-soft startup telemetry, restores the proven 30-second per-command timeout, and disables the incompatible shared cycle cap that exhausted during normal multi-object gcloud I/O.",
+  "CONFIG_VERSION": "v40_coinbase_read_resilience",
+  "CONFIG_NOTE": "v40: retries transient Coinbase 429/5xx/timeout/connection failures only for read-only API calls, keeps order submissions single-attempt, throttles repeated outage alerts, and sends a recovery notification after a successful cycle.",
   "CONTRACT_SIZE_BTC": 0.01,
   "ATR_PERIOD": 14,
   "ATR_STOP_MULTIPLIER": 1.5,

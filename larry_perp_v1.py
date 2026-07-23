@@ -304,6 +304,11 @@ GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "30
 GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "0"))
 GCS_READ_ATTEMPTS = int(os.getenv("GCS_READ_ATTEMPTS", "2"))
 GCS_WRITE_ATTEMPTS = int(os.getenv("GCS_WRITE_ATTEMPTS", "3"))
+COINBASE_READ_ATTEMPTS = max(1, int(os.getenv("COINBASE_READ_ATTEMPTS", "3")))
+COINBASE_READ_BACKOFF_SECONDS = max(0.0, float(os.getenv("COINBASE_READ_BACKOFF_SECONDS", "1.0")))
+COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS = max(
+    60.0, float(os.getenv("COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS", "1800"))
+)
 HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "60"))
 
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
@@ -1083,9 +1088,57 @@ def stoch_rsi(values: List[float], rsi_period: int = 14, stoch_period: int = 14)
 # DATA FETCHING
 # =============================================================================
 
+_COINBASE_OUTAGE_ACTIVE = False
+_COINBASE_OUTAGE_STARTED_AT: Optional[str] = None
+_COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
+
+
+def is_transient_coinbase_error(exc: BaseException) -> bool:
+    """Identify retry-safe failures for read-only Coinbase requests."""
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if status is None:
+        status = getattr(exc, "status_code", None)
+    try:
+        status_int = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status_int = None
+    if status_int == 429 or (status_int is not None and 500 <= status_int <= 599):
+        return True
+
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    transient_names = ("connectionerror", "timeout", "remotedisconnected")
+    transient_text = (
+        "bad gateway", "gateway timeout", "connection aborted",
+        "remote end closed connection", "temporarily unavailable",
+        "connection reset", "timed out",
+    )
+    return any(token in name for token in transient_names) or any(token in message for token in transient_text)
+
+
+def coinbase_read(call_name: str, operation: Any) -> Any:
+    """Retry only read-only Coinbase calls; order submissions never use this."""
+    last_error: Optional[BaseException] = None
+    for attempt in range(1, COINBASE_READ_ATTEMPTS + 1):
+        try:
+            return operation()
+        except Exception as exc:
+            last_error = exc
+            if not is_transient_coinbase_error(exc) or attempt >= COINBASE_READ_ATTEMPTS:
+                raise
+            delay = COINBASE_READ_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            log.warning(
+                "Transient Coinbase read failure for %s attempt %s/%s; retrying in %.2fs: %s",
+                call_name, attempt, COINBASE_READ_ATTEMPTS, delay, exc,
+            )
+            if delay > 0:
+                time.sleep(delay)
+    raise RuntimeError(f"Coinbase read failed without an exception: {call_name}") from last_error
+
 
 def get_product(cb: Any, product_id: str) -> Dict[str, Any]:
-    return obj_to_dict(cb.get_product(product_id))
+    return obj_to_dict(coinbase_read(f"get_product:{product_id}", lambda: cb.get_product(product_id)))
 
 
 def get_btc_price(cb: Any) -> float:
@@ -1118,7 +1171,7 @@ def get_funding_rate(product: Dict[str, Any]) -> float:
 
 
 def get_live_net_position(cb: Any) -> Dict[str, Any]:
-    positions = obj_to_dict(cb.list_futures_positions())
+    positions = obj_to_dict(coinbase_read("list_futures_positions", cb.list_futures_positions))
     rows = positions.get("positions", []) if isinstance(positions, dict) else []
     for p in rows:
         if p.get("product_id") == PERP_PRODUCT_ID:
@@ -1179,7 +1232,12 @@ def get_candles(cb: Any, product_id: str, granularity: str = CANDLE_GRANULARITY,
 
     start = end - (limit * granularity_seconds)
     try:
-        res = cb.get_candles(product_id=product_id, start=str(start), end=str(end), granularity=granularity)
+        res = coinbase_read(
+            f"get_candles:{product_id}",
+            lambda: cb.get_candles(
+                product_id=product_id, start=str(start), end=str(end), granularity=granularity
+            ),
+        )
         data = obj_to_dict(res)
         raw = data.get("candles", data if isinstance(data, list) else [])
     except Exception as e:
@@ -1277,7 +1335,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v39_stable_gcs_retry",
+        "version": "larry_perp_v40_coinbase_read_resilience",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -2194,7 +2252,10 @@ def get_recent_fills_for_order(cb: Any, order_id: Optional[str]) -> Dict[str, An
     if not order_id:
         return out
     try:
-        raw = obj_to_dict(cb.get_fills(product_id=PERP_PRODUCT_ID, limit=FILL_LOOKBACK_LIMIT))
+        raw = obj_to_dict(coinbase_read(
+            "get_fills",
+            lambda: cb.get_fills(product_id=PERP_PRODUCT_ID, limit=FILL_LOOKBACK_LIMIT),
+        ))
         rows = raw.get("fills", []) if isinstance(raw, dict) else []
         matched = [f for f in rows if str(f.get("order_id")) == str(order_id)]
         if not matched:
@@ -3258,7 +3319,7 @@ def mark_cooldown(state: Dict[str, Any], key: str) -> None:
 
 def futures_equity_summary(cb: Any) -> Dict[str, Any]:
     try:
-        raw = obj_to_dict(cb.get_futures_balance_summary())
+        raw = obj_to_dict(coinbase_read("get_futures_balance_summary", cb.get_futures_balance_summary))
         # SDK shapes vary. Try common fields.
         def money(path, default=0.0):
             obj = raw
@@ -3352,7 +3413,7 @@ def calculate_macro_regime_from_candles(candles: List[Dict[str, float]]) -> Dict
 def get_spot_accounts(cb: Any) -> Dict[str, float]:
     out = {"USD": 0.0, "USDC": 0.0, "BTC": 0.0}
     try:
-        accts = obj_to_dict(cb.get_accounts())
+        accts = obj_to_dict(coinbase_read("get_accounts", cb.get_accounts))
         rows = accts.get("accounts", []) if isinstance(accts, dict) else []
         for a in rows:
             cur = a.get("currency") or (a.get("available_balance") or {}).get("currency")
@@ -4257,7 +4318,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v39_stable_gcs_retry",
+        "version": "larry_perp_v40_coinbase_read_resilience",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4774,6 +4835,8 @@ def run_once(cb: Any, gcs: GCS) -> None:
 
 
 def main() -> None:
+    global _COINBASE_OUTAGE_ACTIVE, _COINBASE_OUTAGE_STARTED_AT
+    global _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
     log.info("Loading Coinbase client and GCS...")
     cb = build_coinbase_client()
     gcs = GCS(BUCKET_NAME)
@@ -4792,9 +4855,37 @@ def main() -> None:
         cycle_started = time.monotonic()
         try:
             run_once(cb, gcs)
+            if _COINBASE_OUTAGE_ACTIVE:
+                send_telegram_message(
+                    f"🟢 LARRY EXCHANGE CONNECTION RECOVERED\n"
+                    f"Coinbase reads completed successfully.\n"
+                    f"Outage began: {_COINBASE_OUTAGE_STARTED_AT or 'unknown'}\n"
+                    f"Time: {et_timestamp_short()}",
+                    event_type="COINBASE_RECOVERED",
+                )
+                _COINBASE_OUTAGE_ACTIVE = False
+                _COINBASE_OUTAGE_STARTED_AT = None
+                _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
         except Exception as e:
             log.exception("Main loop error: %s", e)
-            if TELEGRAM_INCLUDE_ERRORS:
+            transient_coinbase = is_transient_coinbase_error(e)
+            should_alert = True
+            if transient_coinbase:
+                now_monotonic = time.monotonic()
+                if not _COINBASE_OUTAGE_ACTIVE:
+                    _COINBASE_OUTAGE_ACTIVE = True
+                    _COINBASE_OUTAGE_STARTED_AT = et_timestamp_short()
+                elif (
+                    _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
+                    and now_monotonic - _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
+                    < COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS
+                ):
+                    should_alert = False
+                if should_alert:
+                    _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = now_monotonic
+                else:
+                    log.warning("Suppressing duplicate Coinbase outage Telegram alert during cooldown")
+            if TELEGRAM_INCLUDE_ERRORS and should_alert:
                 attempted = bool(_CYCLE_CONTEXT.get("order_attempted"))
                 action = (
                     "Order activity occurred; verify client order ID and Coinbase position before any retry."

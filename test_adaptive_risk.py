@@ -195,6 +195,54 @@ class AdaptiveRiskTests(unittest.TestCase):
         # The budget is a counter charged only by _run/backoff, not a wall-clock deadline.
         self.assertEqual(gcs._remaining_cycle_budget(), before)
 
+    def test_coinbase_read_retries_transient_5xx_then_succeeds(self):
+        class Response:
+            status_code = 502
+
+        class TransientError(Exception):
+            response = Response()
+
+        calls = []
+
+        def operation():
+            calls.append(True)
+            if len(calls) < 3:
+                raise TransientError("Bad Gateway")
+            return {"ok": True}
+
+        original_attempts = larry.COINBASE_READ_ATTEMPTS
+        original_backoff = larry.COINBASE_READ_BACKOFF_SECONDS
+        try:
+            larry.COINBASE_READ_ATTEMPTS = 3
+            larry.COINBASE_READ_BACKOFF_SECONDS = 0
+            self.assertEqual(larry.coinbase_read("test", operation), {"ok": True})
+            self.assertEqual(len(calls), 3)
+        finally:
+            larry.COINBASE_READ_ATTEMPTS = original_attempts
+            larry.COINBASE_READ_BACKOFF_SECONDS = original_backoff
+
+    def test_coinbase_read_does_not_retry_non_transient_4xx(self):
+        class Response:
+            status_code = 401
+
+        class AuthError(Exception):
+            response = Response()
+
+        calls = []
+
+        def operation():
+            calls.append(True)
+            raise AuthError("Unauthorized")
+
+        original_backoff = larry.COINBASE_READ_BACKOFF_SECONDS
+        try:
+            larry.COINBASE_READ_BACKOFF_SECONDS = 0
+            with self.assertRaises(AuthError):
+                larry.coinbase_read("test", operation)
+            self.assertEqual(len(calls), 1)
+        finally:
+            larry.COINBASE_READ_BACKOFF_SECONDS = original_backoff
+
 
 if __name__ == "__main__":
     unittest.main()
