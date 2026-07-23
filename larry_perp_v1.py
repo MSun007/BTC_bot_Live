@@ -298,8 +298,8 @@ STREAK_PAUSE_MINUTES = float(os.getenv("STREAK_PAUSE_MINUTES", str(STREAK_PAUSE_
 CANDLE_GRANULARITY = os.getenv("CANDLE_GRANULARITY", "ONE_HOUR")
 CANDLE_LIMIT = int(os.getenv("CANDLE_LIMIT", "300"))
 LOOP_SECONDS = int(os.getenv("LOOP_SECONDS", "60"))
-GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "10"))
-GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "35"))
+GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "20"))
+GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "50"))
 GCS_READ_ATTEMPTS = int(os.getenv("GCS_READ_ATTEMPTS", "2"))
 GCS_WRITE_ATTEMPTS = int(os.getenv("GCS_WRITE_ATTEMPTS", "3"))
 HEARTBEAT_SECONDS = int(os.getenv("HEARTBEAT_SECONDS", "60"))
@@ -1274,7 +1274,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v37_gcs_io_accounting",
+        "version": "larry_perp_v38_resilient_gcs_startup",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -4254,7 +4254,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v37_gcs_io_accounting",
+        "version": "larry_perp_v38_resilient_gcs_startup",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4778,7 +4778,11 @@ def main() -> None:
     # Startup verification: live exchange state is source of truth.
     live = get_live_net_position(cb)
     log.info("Startup exchange reconciliation: %s", live)
-    write_heartbeat(gcs, live.get("current_price") or 0.0, "STARTUP", live)
+    try:
+        write_heartbeat(gcs, live.get("current_price") or 0.0, "STARTUP", live)
+    except Exception as e:
+        # Telemetry storage latency must never terminate the trading process.
+        log.warning("Non-fatal startup heartbeat write failure: %s", e)
     send_telegram_message(f"🟢 Larry Perp started\nPosition: {live.get('side')} {live.get('contracts')}\nTime: {et_timestamp_short()}", event_type="BOT_STARTED")
 
     while True:

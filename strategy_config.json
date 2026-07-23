@@ -1,6 +1,6 @@
 {
-  "CONFIG_VERSION": "v37_gcs_io_accounting",
-  "CONFIG_NOTE": "v37: corrects v36 so the shared storage budget charges only actual GCS command and retry-backoff time; Coinbase calls and strategy processing no longer exhaust the GCS allowance before state saves.",
+  "CONFIG_VERSION": "v38_resilient_gcs_startup",
+  "CONFIG_NOTE": "v38: charges only actual storage I/O, allows 20 seconds for normal gcloud startup latency, caps cycle storage work at 50 seconds, and makes startup heartbeat writes fail-soft so telemetry latency cannot terminate Larry.",
   "CONTRACT_SIZE_BTC": 0.01,
   "ATR_PERIOD": 14,
   "ATR_STOP_MULTIPLIER": 1.5,
