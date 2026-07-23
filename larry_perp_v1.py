@@ -595,7 +595,7 @@ class GCS:
         self.use_python_storage = os.getenv("USE_PYTHON_GCS_CLIENT", "false").lower() in ("1", "true", "yes")
         self.client = None
         self.bucket = None
-        self._cycle_io_deadline: Optional[float] = None
+        self._cycle_io_remaining_seconds: Optional[float] = None
         if self.use_python_storage:
             try:
                 self.client = build_storage_client()
@@ -611,13 +611,22 @@ class GCS:
         return f"{self.prefix}/{blob_name}"
 
     def begin_cycle_budget(self, seconds: float = GCS_CYCLE_IO_BUDGET_SECONDS) -> None:
-        """Share one bounded GCS time allowance across the whole trading cycle."""
-        self._cycle_io_deadline = time.monotonic() + max(1.0, float(seconds))
+        """Share one bounded *GCS I/O* allowance across the trading cycle.
+
+        Only time spent inside GCS commands and their retry backoff is charged.
+        Coinbase calls and strategy evaluation must not consume storage budget.
+        """
+        self._cycle_io_remaining_seconds = max(1.0, float(seconds))
 
     def _remaining_cycle_budget(self) -> Optional[float]:
-        if self._cycle_io_deadline is None:
-            return None
-        return max(0.0, self._cycle_io_deadline - time.monotonic())
+        return self._cycle_io_remaining_seconds
+
+    def _charge_cycle_budget(self, seconds: float) -> None:
+        if self._cycle_io_remaining_seconds is not None:
+            self._cycle_io_remaining_seconds = max(
+                0.0,
+                self._cycle_io_remaining_seconds - max(0.0, float(seconds)),
+            )
 
     def _run(
         self,
@@ -631,15 +640,19 @@ class GCS:
         timeout = max(0.25, float(timeout_seconds or GCS_COMMAND_TIMEOUT_SECONDS))
         if remaining is not None:
             timeout = min(timeout, max(0.25, remaining))
-        return subprocess.run(
-            cmd,
-            input=input_text,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
+        started = time.monotonic()
+        try:
+            return subprocess.run(
+                cmd,
+                input=input_text,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        finally:
+            self._charge_cycle_budget(time.monotonic() - started)
 
     def _run_with_retry(
         self,
@@ -668,7 +681,11 @@ class GCS:
                 if delay <= 0:
                     raise TimeoutError("GCS cycle I/O budget exhausted") from last_error
                 log.warning("Transient GCS command failure attempt %s/%s; retrying in %.2fs: %s", attempt, attempts, delay, last_error)
-                time.sleep(delay)
+                backoff_started = time.monotonic()
+                try:
+                    time.sleep(delay)
+                finally:
+                    self._charge_cycle_budget(time.monotonic() - backoff_started)
         assert last_error is not None
         raise last_error
 
@@ -1257,7 +1274,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v36_bounded_gcs_io",
+        "version": "larry_perp_v37_gcs_io_accounting",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -4237,7 +4254,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v36_bounded_gcs_io",
+        "version": "larry_perp_v37_gcs_io_accounting",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,

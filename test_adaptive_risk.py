@@ -164,7 +164,7 @@ class AdaptiveRiskTests(unittest.TestCase):
                 self.use_python_storage = False
                 self.client = None
                 self.bucket = None
-                self._cycle_io_deadline = None
+                self._cycle_io_remaining_seconds = None
                 self.calls = 0
 
             def _run(self, cmd, input_text=None, timeout_seconds=None):
@@ -184,9 +184,16 @@ class AdaptiveRiskTests(unittest.TestCase):
 
     def test_gcs_cycle_budget_fails_fast_when_exhausted(self):
         gcs = object.__new__(larry.GCS)
-        gcs._cycle_io_deadline = larry.time.monotonic() - 1
+        gcs._cycle_io_remaining_seconds = 0
         with self.assertRaises(TimeoutError):
             gcs._run(["gcloud", "storage", "cat", "gs://test/object"])
+
+    def test_non_gcs_time_does_not_consume_gcs_budget(self):
+        gcs = object.__new__(larry.GCS)
+        gcs.begin_cycle_budget(35)
+        before = gcs._remaining_cycle_budget()
+        # The budget is a counter charged only by _run/backoff, not a wall-clock deadline.
+        self.assertEqual(gcs._remaining_cycle_budget(), before)
 
 
 if __name__ == "__main__":

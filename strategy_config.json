@@ -1,6 +1,6 @@
 {
-  "CONFIG_VERSION": "v36_bounded_gcs_io",
-  "CONFIG_NOTE": "v36: preserves the v35 fresh-setup guard and adds bounded retry for critical GCS reads plus a shared per-cycle I/O budget so storage outages cannot stall the trading loop for minutes.",
+  "CONFIG_VERSION": "v37_gcs_io_accounting",
+  "CONFIG_NOTE": "v37: corrects v36 so the shared storage budget charges only actual GCS command and retry-backoff time; Coinbase calls and strategy processing no longer exhaust the GCS allowance before state saves.",
   "CONTRACT_SIZE_BTC": 0.01,
   "ATR_PERIOD": 14,
   "ATR_STOP_MULTIPLIER": 1.5,
