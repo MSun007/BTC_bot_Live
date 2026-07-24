@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v42_tsl_position_ownership
+larry_perp_v43_fee_control_integrity
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -384,6 +384,40 @@ Before changing production files:
 After each material strategy change, update this README, configuration notes, tests and dashboard labels together.
 
 ## Current production release
+
+The v43 release is a conservative fee-control trial based on the 229-order
+ledger review. The audit correctly identified that entry and add fees were
+missing from the displayed realized-net total, but entry-reason rows do not
+contain the eventual P&L of the position they opened. Therefore v43 does not
+apply the proposed adaptive 90/90 change or claim a historical counterfactual
+profit. It makes only directly defensible, reversible frequency changes:
+
+- Reversal probes are disabled; fully qualified core signals remain active.
+- One genuine same-side extension is allowed per position.
+- That extension requires at least 25 percentage points of confidence
+  improvement.
+- Fresh entries and reversals no longer consume the add allowance, and flat
+  resets it for the next position.
+- The directional entry cooldown is 900 seconds and is reapplied from live
+  configuration every cycle rather than remaining stuck at a persisted value.
+- Adaptive defence remains at score 75 to reduce and 85 to exit, with v42's
+  three confirmations, 20-minute grace and 0.50 ATR adverse gate.
+- TP1, TSL and the firm 1.5 ATR stop are unchanged.
+
+Production deployment (July 24, 2026):
+
+- Release commit: `e6fd10d`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v43_fee_control_integrity`
+- Exchange position before, during and after deployment: `FLAT 0`
+- First completed cycle: healthy at 17:13:06 UTC; no order attempted
+- Effective persisted cooldown after state save: 900 seconds
+- Regression suite: 29 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v43_20260724_1308`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v43_20260724_1308.json`
+- Local backup: `LIVE PLATFORM/backup_pre_fee_control_integrity_20260724_1308`
+
+### Prior v42 release
 
 The v42 release corrects the premature trailing-stop exit observed after the
 July 24 short-to-long reversal. The new long had inherited the prior short's
