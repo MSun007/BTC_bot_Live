@@ -1,0 +1,9 @@
+# Python bytecode / caches (generated when running tests locally)
+__pycache__/
+*.pyc
+*.pyo
+
+# Local ledger / state exports pulled for analysis
+ledger.csv
+engine_state.json
+*.log
