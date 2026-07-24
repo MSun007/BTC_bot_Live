@@ -1,6 +1,6 @@
 {
-  "CONFIG_VERSION": "v40_coinbase_read_resilience",
-  "CONFIG_NOTE": "v40: retries transient Coinbase 429/5xx/timeout/connection failures only for read-only API calls, keeps order submissions single-attempt, throttles repeated outage alerts, and sends a recovery notification after a successful cycle.",
+  "CONFIG_VERSION": "v41_adaptive_entry_guard",
+  "CONFIG_NOTE": "v41: prevents immediate fee-heavy adaptive stepdowns with a 10-minute entry grace, requires at least 0.25 ATR post-entry adverse excursion for ordinary defence, allows only structure-plus-volume emergencies during grace, halves exposure on the first reduction, and makes REVERSAL_PROBE_CONTRACTS authoritative.",
   "CONTRACT_SIZE_BTC": 0.01,
   "ATR_PERIOD": 14,
   "ATR_STOP_MULTIPLIER": 1.5,
@@ -78,6 +78,8 @@
   "ADAPTIVE_REDUCE_SCORE": 65,
   "ADAPTIVE_EXIT_SCORE": 85,
   "ADAPTIVE_CONFIRM_CYCLES": 2,
+  "ADAPTIVE_ENTRY_GRACE_MINUTES": 10,
+  "ADAPTIVE_MIN_ADVERSE_ATR": 0.25,
   "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": 15,
   "ADAPTIVE_FRESH_SETUP_REQUIRED": true,
   "ADAPTIVE_REENTRY_PROBE_ONLY": true,

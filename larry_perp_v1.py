@@ -273,6 +273,8 @@ ADAPTIVE_DEFENSE_ENABLED = os.getenv("ADAPTIVE_DEFENSE_ENABLED", "true").lower()
 ADAPTIVE_REDUCE_SCORE = int(os.getenv("ADAPTIVE_REDUCE_SCORE", "65"))
 ADAPTIVE_EXIT_SCORE = int(os.getenv("ADAPTIVE_EXIT_SCORE", "85"))
 ADAPTIVE_CONFIRM_CYCLES = int(os.getenv("ADAPTIVE_CONFIRM_CYCLES", "2"))
+ADAPTIVE_ENTRY_GRACE_MINUTES = float(os.getenv("ADAPTIVE_ENTRY_GRACE_MINUTES", "10"))
+ADAPTIVE_MIN_ADVERSE_ATR = float(os.getenv("ADAPTIVE_MIN_ADVERSE_ATR", "0.25"))
 ADAPTIVE_REENTRY_COOLDOWN_MINUTES = int(os.getenv("ADAPTIVE_REENTRY_COOLDOWN_MINUTES", "15"))
 ADAPTIVE_FRESH_SETUP_REQUIRED = os.getenv("ADAPTIVE_FRESH_SETUP_REQUIRED", "true").lower() in ("1", "true", "yes")
 ADAPTIVE_REENTRY_PROBE_ONLY = os.getenv("ADAPTIVE_REENTRY_PROBE_ONLY", "true").lower() in ("1", "true", "yes")
@@ -419,6 +421,8 @@ DEFAULT_STRATEGY_CONFIG = {
     "ADAPTIVE_REDUCE_SCORE": ADAPTIVE_REDUCE_SCORE,
     "ADAPTIVE_EXIT_SCORE": ADAPTIVE_EXIT_SCORE,
     "ADAPTIVE_CONFIRM_CYCLES": ADAPTIVE_CONFIRM_CYCLES,
+    "ADAPTIVE_ENTRY_GRACE_MINUTES": ADAPTIVE_ENTRY_GRACE_MINUTES,
+    "ADAPTIVE_MIN_ADVERSE_ATR": ADAPTIVE_MIN_ADVERSE_ATR,
     "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": ADAPTIVE_REENTRY_COOLDOWN_MINUTES,
     "ADAPTIVE_FRESH_SETUP_REQUIRED": ADAPTIVE_FRESH_SETUP_REQUIRED,
     "ADAPTIVE_REENTRY_PROBE_ONLY": ADAPTIVE_REENTRY_PROBE_ONLY,
@@ -856,7 +860,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "FUNDING_SHORT_MIN", "FUNDING_SIZE_REDUCE_AT",
         "PROBE_PCT", "PARTIAL_PCT", "STRONG_PCT",
         "REVERSAL_NEAR_BB_PCT", "REVERSAL_RSI_SOFT_LONG_MAX", "REVERSAL_RSI_SOFT_SHORT_MIN",
-        "MIN_FUTURES_EQUITY_BUFFER_USD",
+        "MIN_FUTURES_EQUITY_BUFFER_USD", "ADAPTIVE_ENTRY_GRACE_MINUTES", "ADAPTIVE_MIN_ADVERSE_ATR",
         "MAX_EFFECTIVE_LEVERAGE", "RSI_LONG_MAX", "RSI_SHORT_MIN",
         "STOCH_LONG_MAX", "STOCH_SHORT_MIN", "VOL_SPIKE_MIN", "SPOT_MIN_ORDER_USD",
     ]
@@ -897,7 +901,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     """
     global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
-    global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
+    global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_ENTRY_GRACE_MINUTES, ADAPTIVE_MIN_ADVERSE_ATR, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES
     global MIN_ENTRY_COOLDOWN_SECONDS, SPOT_TRANCHE_TARGETS_PCT, MIN_FUTURES_EQUITY_BUFFER_USD, MAX_EFFECTIVE_LEVERAGE
     global RSI_LONG_MAX, RSI_SHORT_MIN, STOCH_LONG_MAX, STOCH_SHORT_MIN, VOL_SPIKE_MIN
@@ -960,6 +964,8 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     ADAPTIVE_REDUCE_SCORE = max(1, min(100, safe_int(cfg.get("ADAPTIVE_REDUCE_SCORE"), ADAPTIVE_REDUCE_SCORE)))
     ADAPTIVE_EXIT_SCORE = max(ADAPTIVE_REDUCE_SCORE, min(100, safe_int(cfg.get("ADAPTIVE_EXIT_SCORE"), ADAPTIVE_EXIT_SCORE)))
     ADAPTIVE_CONFIRM_CYCLES = max(1, safe_int(cfg.get("ADAPTIVE_CONFIRM_CYCLES"), ADAPTIVE_CONFIRM_CYCLES))
+    ADAPTIVE_ENTRY_GRACE_MINUTES = max(0.0, safe_float(cfg.get("ADAPTIVE_ENTRY_GRACE_MINUTES"), ADAPTIVE_ENTRY_GRACE_MINUTES))
+    ADAPTIVE_MIN_ADVERSE_ATR = max(0.0, safe_float(cfg.get("ADAPTIVE_MIN_ADVERSE_ATR"), ADAPTIVE_MIN_ADVERSE_ATR))
     ADAPTIVE_REENTRY_COOLDOWN_MINUTES = max(1, safe_int(cfg.get("ADAPTIVE_REENTRY_COOLDOWN_MINUTES"), ADAPTIVE_REENTRY_COOLDOWN_MINUTES))
     ADAPTIVE_FRESH_SETUP_REQUIRED = _bool_from_any(cfg.get("ADAPTIVE_FRESH_SETUP_REQUIRED"), ADAPTIVE_FRESH_SETUP_REQUIRED)
     ADAPTIVE_REENTRY_PROBE_ONLY = _bool_from_any(cfg.get("ADAPTIVE_REENTRY_PROBE_ONLY"), ADAPTIVE_REENTRY_PROBE_ONLY)
@@ -1335,7 +1341,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v40_coinbase_read_resilience",
+        "version": "larry_perp_v41_adaptive_entry_guard",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -1374,6 +1380,9 @@ def default_engine_state() -> Dict[str, Any]:
             "phantom_extension_target_contracts": None,
             "position_version": 0,
             "position_fingerprint": None,
+            "adaptive_entry_at": None,
+            "adaptive_entry_price": None,
+            "adaptive_entry_baseline": None,
             "adaptive_defense": {},
         },
         "market_structure": {},
@@ -1816,6 +1825,12 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
     fb = funding_size_modifier(candidate, funding_rate) if 'funding_size_modifier' in globals() else "FULL"
     macro_open = bool((state.get("macro_regime") or {}).get("gate_open"))
     decision = sizing_decision_for_signal(candidate, candidate_score, funding_rate, macro_open) if 'sizing_decision_for_signal' in globals() else {}
+    if candidate_class == "REVERSAL_PROBE":
+        probe_contracts = max(1, min(REVERSAL_PROBE_CONTRACTS, MAX_CONVICTION_CONTRACTS))
+        decision = dict(decision)
+        decision["target_abs_contracts"] = probe_contracts
+        decision["final_contracts"] = probe_contracts
+        decision["reason"] = "authoritative_reversal_probe_cap"
 
     # Score-4 core setup: do not make it jump through phantom if enabled. This matches operator expectation:
     # all 4 long/short triggers = committed entry, subject to risk/portfolio guards in caller.
@@ -2682,6 +2697,9 @@ def update_position_version(controls: Dict[str, Any], live_pos: Dict[str, Any], 
         previous = controls.get("position_fingerprint")
         controls["position_version"] = safe_int(controls.get("position_version"), 0) + 1
         controls["position_fingerprint"] = fingerprint
+        controls["adaptive_entry_at"] = iso_utc()
+        controls["adaptive_entry_price"] = avg
+        controls["adaptive_entry_baseline"] = None
         controls["position_reanchor"] = {
             "version": controls["position_version"], "previous_fingerprint": previous,
             "new_fingerprint": fingerprint, "signed_contracts": signed,
@@ -2719,18 +2737,72 @@ def adaptive_defense_snapshot(state: Dict[str, Any], live_pos: Dict[str, Any], s
     if sig.rsi is not None and ((side == "LONG" and sig.rsi < 40) or (side == "SHORT" and sig.rsi > 60)):
         score += 10; evidence.append({"factor": "adverse_rsi_regime", "points": 10, "rsi": sig.rsi})
     score = min(100, score)
-    prior = ((state.get("position_controls") or {}).get("adaptive_defense") or {})
-    cycles = safe_int(prior.get("confirm_cycles"), 0) + 1 if score >= ADAPTIVE_REDUCE_SCORE else 0
+
+    controls = state.setdefault("position_controls", default_engine_state()["position_controls"])
+    entry_at = parse_dt(controls.get("adaptive_entry_at"))
+    entry_price = safe_float(controls.get("adaptive_entry_price"), 0.0) or safe_float(
+        live_pos.get("avg_entry_price"), 0.0
+    )
+    atr_locked = safe_float(controls.get("atr_at_entry"), 0.0) or safe_float(sig.atr, 0.0)
+    age_seconds = max(0.0, (now_utc() - entry_at).total_seconds()) if entry_at else 0.0
+    grace_seconds = max(0.0, ADAPTIVE_ENTRY_GRACE_MINUTES * 60.0)
+    in_entry_grace = bool(entry_at and age_seconds < grace_seconds)
+    adverse_excursion = max(
+        0.0,
+        (entry_price - sig.price) if side == "LONG" else (sig.price - entry_price),
+    )
+    adverse_atr = adverse_excursion / atr_locked if atr_locked > 0 else 0.0
+    factors = [str(item.get("factor")) for item in evidence if item.get("factor")]
+    baseline = controls.get("adaptive_entry_baseline")
+    if not isinstance(baseline, dict):
+        baseline = {
+            "captured_at": iso_utc(),
+            "score": score,
+            "factors": factors,
+            "price": sig.price,
+            "position_version": controls.get("position_version"),
+        }
+        controls["adaptive_entry_baseline"] = baseline
+    baseline_factors = set(baseline.get("factors") or [])
+    new_factors = [factor for factor in factors if factor not in baseline_factors]
+    score_delta = score - safe_int(baseline.get("score"), 0)
+    post_entry_deterioration = bool(new_factors or score_delta > 0 or adverse_atr >= ADAPTIVE_MIN_ADVERSE_ATR)
+    emergency_during_grace = bool(
+        adverse_atr >= ADAPTIVE_MIN_ADVERSE_ATR
+        and "confirmed_structure_break" in factors
+        and "adverse_volume_expansion" in factors
+    )
+    ordinary_eligible = bool(
+        not in_entry_grace
+        and adverse_atr >= ADAPTIVE_MIN_ADVERSE_ATR
+        and post_entry_deterioration
+    )
+    defense_eligible = emergency_during_grace or ordinary_eligible
+
+    prior = (controls.get("adaptive_defense") or {})
+    cycles = (
+        safe_int(prior.get("confirm_cycles"), 0) + 1
+        if defense_eligible and score >= ADAPTIVE_REDUCE_SCORE
+        else 0
+    )
     action = "HOLD"
-    if score >= ADAPTIVE_EXIT_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
+    if defense_eligible and score >= ADAPTIVE_EXIT_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
         action = "EXIT"
-    elif score >= ADAPTIVE_REDUCE_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
+    elif defense_eligible and score >= ADAPTIVE_REDUCE_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
         action = "REDUCE_ONE_RUNG"
-    elif score >= ADAPTIVE_REDUCE_SCORE:
+    elif defense_eligible and score >= ADAPTIVE_REDUCE_SCORE:
         action = "CONFIRMING"
     return {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": score, "state": action,
             "confirm_cycles": cycles, "required_cycles": ADAPTIVE_CONFIRM_CYCLES,
-            "evidence": evidence, "side": side, "evaluated_at": iso_utc()}
+            "evidence": evidence, "side": side, "evaluated_at": iso_utc(),
+            "entry_age_seconds": age_seconds, "entry_grace_active": in_entry_grace,
+            "entry_grace_minutes": ADAPTIVE_ENTRY_GRACE_MINUTES,
+            "adverse_excursion": adverse_excursion, "adverse_atr": adverse_atr,
+            "minimum_adverse_atr": ADAPTIVE_MIN_ADVERSE_ATR,
+            "baseline_score": baseline.get("score"), "score_delta": score_delta,
+            "new_factors": new_factors, "post_entry_deterioration": post_entry_deterioration,
+            "emergency_during_grace": emergency_during_grace,
+            "eligible": defense_eligible}
 
 
 def start_adaptive_reentry_guard(state: Dict[str, Any], side: str, reason: str) -> Dict[str, Any]:
@@ -2877,6 +2949,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
             "tsl_active": False, "tsl_stop": None,
             "tp1_done": False, "tp1_trigger_price": None, "tp1_pct_active": None, "tp1_target_contracts": None,
             "phantom_extension_add_done": False, "phantom_extension_target_price": None, "phantom_extension_target_contracts": None,
+            "adaptive_entry_at": None, "adaptive_entry_price": None, "adaptive_entry_baseline": None,
             "adaptive_defense": {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": 0, "state": "FLAT", "evidence": []},
         })
         return controls
@@ -2969,7 +3042,7 @@ def risk_exit_target_if_needed(live_pos: Dict[str, Any], controls: Dict[str, Any
         if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "EXIT":
             return 0, "ADAPTIVE_DEFENSE_EXIT_LONG"
         if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "REDUCE_ONE_RUNG":
-            keep = next_lower_ladder_target(abs(signed))
+            keep = adaptive_reduce_target(abs(signed))
             if keep < abs(signed):
                 return keep, "ADAPTIVE_DEFENSE_REDUCE_LONG"
         if (not tp1_done) and tp1_trigger and price >= tp1_trigger:
@@ -2984,7 +3057,7 @@ def risk_exit_target_if_needed(live_pos: Dict[str, Any], controls: Dict[str, Any
         if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "EXIT":
             return 0, "ADAPTIVE_DEFENSE_EXIT_SHORT"
         if ADAPTIVE_DEFENSE_ENABLED and defense.get("state") == "REDUCE_ONE_RUNG":
-            keep = next_lower_ladder_target(abs(signed))
+            keep = adaptive_reduce_target(abs(signed))
             if keep < abs(signed):
                 return -keep, "ADAPTIVE_DEFENSE_REDUCE_SHORT"
         if (not tp1_done) and tp1_trigger and price <= tp1_trigger:
@@ -3690,6 +3763,20 @@ def next_lower_ladder_target(current_abs_contracts: int) -> int:
     return max(lower) if lower else max(1, cur - 1)
 
 
+def adaptive_reduce_target(current_abs_contracts: int) -> int:
+    """Use a gentler first defensive cut than the profit-taking ladder.
+
+    The conviction ladder's lowest configured rung can be four contracts, so its
+    next lower target is the one-contract runner. For loss defence that 75% cut
+    is unnecessarily fee-heavy; halve exposure first, then require a later,
+    separately confirmed deterioration before reducing again.
+    """
+    cur = abs(safe_int(current_abs_contracts, 0))
+    if cur <= 1:
+        return cur
+    return max(1, int(math.ceil(cur / 2.0)))
+
+
 def tp1_trigger_pct_for_position(current_abs_contracts: int) -> float:
     """Dynamic TP1 trigger: larger positions lock gains sooner."""
     if not TP1_DYNAMIC_BY_LADDER:
@@ -4318,7 +4405,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v40_coinbase_read_resilience",
+        "version": "larry_perp_v41_adaptive_entry_guard",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4691,6 +4778,14 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         target = core_target_for_signal(live_now["signed_contracts"], confirmed, _score, _funding, _macro_open)
                         if FREEZE_CONFIDENCE_ON_ARM and _ctx.get("target_abs_contracts"):
                             target = clamp_target((+1 if confirmed == "LONG" else -1) * safe_int(_ctx.get("target_abs_contracts"), 0))
+                        _locked_class = ((state.get("phantom") or {}).get("signal_class") or "CORE")
+                        if _locked_class == "REVERSAL_PROBE":
+                            reversal_cap = max(1, min(REVERSAL_PROBE_CONTRACTS, MAX_CONVICTION_CONTRACTS))
+                            target = clamp_target((1 if confirmed == "LONG" else -1) * reversal_cap)
+                            sizing_decision["reversal_probe_cap"] = True
+                            sizing_decision["target_abs_contracts"] = reversal_cap
+                            sizing_decision["final_contracts"] = reversal_cap
+                            sizing_decision["reason"] = "authoritative_reversal_probe_cap"
                         _adaptive_guard = state.get("adaptive_reentry_guard") or {}
                         _guarded_reentry = bool(
                             _adaptive_guard.get("active")
@@ -4729,7 +4824,6 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         state["last_portfolio_guard"] = {"ok": ok, "reason": guard_reason, **guard}
                         _setup_id = (state.get("phantom") or {}).get("setup_id")
                         if ok:
-                            _locked_class = ((state.get("phantom") or {}).get("signal_class") or "CORE")
                             core_reason = f"REVERSAL_PROBE_{confirmed}_PHANTOM_CONFIRMED" if _locked_class == "REVERSAL_PROBE" else f"CORE_IAF_{confirmed}_PHANTOM_CONFIRMED"
                             last_result = execute_target(cb, gcs, target, core_reason, signal_class=core_reason)
                             append_decision_event(gcs, {

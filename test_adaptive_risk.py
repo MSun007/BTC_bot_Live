@@ -42,6 +42,62 @@ class AdaptiveRiskTests(unittest.TestCase):
         self.assertLess(target, 8)
         self.assertEqual(reason, "ADAPTIVE_DEFENSE_REDUCE_LONG")
 
+    def test_adaptive_reduction_halves_four_contract_probe(self):
+        controls = {"adaptive_defense": {"state": "REDUCE_ONE_RUNG"}}
+        target, reason = larry.risk_exit_target_if_needed(
+            {"signed_contracts": -4}, controls, 100
+        )
+        self.assertEqual(target, -2)
+        self.assertEqual(reason, "ADAPTIVE_DEFENSE_REDUCE_SHORT")
+
+    def test_adaptive_entry_grace_blocks_ordinary_early_reduction(self):
+        state = larry.default_engine_state()
+        controls = state["position_controls"]
+        controls.update({
+            "adaptive_entry_at": larry.iso_utc(),
+            "adaptive_entry_price": 100,
+            "atr_at_entry": 10,
+            "adaptive_entry_baseline": {"score": 0, "factors": []},
+        })
+        bars = [
+            candle(1, 89, 91, 88, 90), candle(2, 90, 92, 89, 91),
+            candle(3, 91, 93, 90, 92), candle(4, 92, 94, 91, 93),
+            candle(5, 93, 95, 92, 94), candle(6, 94, 102, 93, 98),
+        ]
+        sig = larry.SignalSnapshot(101, 70, 2.0, 90, 95, 105, 10, 2, 0, 3, {}, {})
+        result = larry.adaptive_defense_snapshot(
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars, {}
+        )
+        self.assertTrue(result["entry_grace_active"])
+        self.assertEqual(result["state"], "HOLD")
+        self.assertFalse(result["eligible"])
+
+    def test_adaptive_defense_requires_post_entry_atr_excursion_then_confirms(self):
+        state = larry.default_engine_state()
+        controls = state["position_controls"]
+        controls.update({
+            "adaptive_entry_at": (larry.now_utc() - larry.timedelta(minutes=20)).isoformat(),
+            "adaptive_entry_price": 100,
+            "atr_at_entry": 10,
+            "adaptive_entry_baseline": {"score": 0, "factors": []},
+        })
+        bars = [
+            candle(1, 89, 91, 88, 90), candle(2, 90, 92, 89, 91),
+            candle(3, 91, 93, 90, 92), candle(4, 92, 94, 91, 93),
+            candle(5, 93, 95, 92, 94), candle(6, 94, 104, 93, 98),
+        ]
+        sig = larry.SignalSnapshot(103, 70, 2.0, 90, 95, 105, 10, 2, 0, 3, {}, {})
+        first = larry.adaptive_defense_snapshot(
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars, {}
+        )
+        self.assertEqual(first["state"], "CONFIRMING")
+        self.assertGreaterEqual(first["adverse_atr"], 0.25)
+        controls["adaptive_defense"] = first
+        second = larry.adaptive_defense_snapshot(
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars, {}
+        )
+        self.assertEqual(second["state"], "REDUCE_ONE_RUNG")
+
     def test_firm_atr_stop_has_priority(self):
         controls = {"atr_stop": 95, "adaptive_defense": {"state": "REDUCE_ONE_RUNG"}}
         target, reason = larry.risk_exit_target_if_needed({"signed_contracts": 8}, controls, 94)
