@@ -270,11 +270,11 @@ TP1_FULL_TRIGGER_PCT = float(os.getenv("TP1_FULL_TRIGGER_PCT", "0.0050"))
 TP1_USE_R_MULTIPLE = os.getenv("TP1_USE_R_MULTIPLE", "true").lower() in ("1", "true", "yes")
 TP1_R_MULTIPLE = float(os.getenv("TP1_R_MULTIPLE", "0.75"))
 ADAPTIVE_DEFENSE_ENABLED = os.getenv("ADAPTIVE_DEFENSE_ENABLED", "true").lower() in ("1", "true", "yes")
-ADAPTIVE_REDUCE_SCORE = int(os.getenv("ADAPTIVE_REDUCE_SCORE", "65"))
+ADAPTIVE_REDUCE_SCORE = int(os.getenv("ADAPTIVE_REDUCE_SCORE", "75"))
 ADAPTIVE_EXIT_SCORE = int(os.getenv("ADAPTIVE_EXIT_SCORE", "85"))
-ADAPTIVE_CONFIRM_CYCLES = int(os.getenv("ADAPTIVE_CONFIRM_CYCLES", "2"))
-ADAPTIVE_ENTRY_GRACE_MINUTES = float(os.getenv("ADAPTIVE_ENTRY_GRACE_MINUTES", "10"))
-ADAPTIVE_MIN_ADVERSE_ATR = float(os.getenv("ADAPTIVE_MIN_ADVERSE_ATR", "0.25"))
+ADAPTIVE_CONFIRM_CYCLES = int(os.getenv("ADAPTIVE_CONFIRM_CYCLES", "3"))
+ADAPTIVE_ENTRY_GRACE_MINUTES = float(os.getenv("ADAPTIVE_ENTRY_GRACE_MINUTES", "20"))
+ADAPTIVE_MIN_ADVERSE_ATR = float(os.getenv("ADAPTIVE_MIN_ADVERSE_ATR", "0.50"))
 ADAPTIVE_REENTRY_COOLDOWN_MINUTES = int(os.getenv("ADAPTIVE_REENTRY_COOLDOWN_MINUTES", "15"))
 ADAPTIVE_FRESH_SETUP_REQUIRED = os.getenv("ADAPTIVE_FRESH_SETUP_REQUIRED", "true").lower() in ("1", "true", "yes")
 ADAPTIVE_REENTRY_PROBE_ONLY = os.getenv("ADAPTIVE_REENTRY_PROBE_ONLY", "true").lower() in ("1", "true", "yes")
@@ -1341,7 +1341,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v41_adaptive_entry_guard",
+        "version": "larry_perp_v42_tsl_position_ownership",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -1375,11 +1375,14 @@ def default_engine_state() -> Dict[str, Any]:
             "atr_stop": None,
             "tsl_active": False,
             "tsl_stop": None,
+            "tsl_position_version": None,
             "phantom_extension_add_done": False,
             "phantom_extension_target_price": None,
             "phantom_extension_target_contracts": None,
             "position_version": 0,
             "position_fingerprint": None,
+            "position_signed_contracts": 0,
+            "position_avg_entry": None,
             "adaptive_entry_at": None,
             "adaptive_entry_price": None,
             "adaptive_entry_baseline": None,
@@ -2695,8 +2698,33 @@ def update_position_version(controls: Dict[str, Any], live_pos: Dict[str, Any], 
     fingerprint = f"{signed}:{avg:.8f}"
     if controls.get("position_fingerprint") != fingerprint:
         previous = controls.get("position_fingerprint")
+        prior_signed = safe_int(controls.get("position_signed_contracts"), 0)
+        prior_avg = safe_float(controls.get("position_avg_entry"), 0.0)
+        side_changed = bool(
+            prior_signed and signed and ((prior_signed > 0) != (signed > 0))
+        )
+        new_trade = bool(
+            (prior_signed == 0 and signed != 0)
+            or side_changed
+            or (prior_avg > 0 and avg > 0 and abs(prior_avg - avg) > 1e-8)
+        )
         controls["position_version"] = safe_int(controls.get("position_version"), 0) + 1
         controls["position_fingerprint"] = fingerprint
+        controls["position_signed_contracts"] = signed
+        controls["position_avg_entry"] = avg or None
+        if new_trade:
+            # Watermarks and trailing stops belong to one side/average only.
+            # Never let a prior position's profitable excursion stop a new trade.
+            controls["highest_price"] = None
+            controls["lowest_price"] = None
+            controls["tsl_active"] = False
+            controls["tsl_stop"] = None
+            controls["tsl_activation_price"] = None
+            controls["tsl_position_version"] = None
+        elif controls.get("tsl_active"):
+            # A same-side quantity-only reduction preserves the valid trailing
+            # stop while transferring ownership to the new position version.
+            controls["tsl_position_version"] = controls["position_version"]
         controls["adaptive_entry_at"] = iso_utc()
         controls["adaptive_entry_price"] = avg
         controls["adaptive_entry_baseline"] = None
@@ -2946,7 +2974,8 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
         controls.update({
             "highest_price": None, "lowest_price": None,
             "atr_stop": None, "atr_at_entry": None, "atr_entry_avg": None,
-            "tsl_active": False, "tsl_stop": None,
+            "tsl_active": False, "tsl_stop": None, "tsl_position_version": None,
+            "position_signed_contracts": 0, "position_avg_entry": None,
             "tp1_done": False, "tp1_trigger_price": None, "tp1_pct_active": None, "tp1_target_contracts": None,
             "phantom_extension_add_done": False, "phantom_extension_target_price": None, "phantom_extension_target_contracts": None,
             "adaptive_entry_at": None, "adaptive_entry_price": None, "adaptive_entry_baseline": None,
@@ -2965,6 +2994,19 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
 
     atr_locked = safe_float(controls.get("atr_at_entry"), 0.0) or a
     update_position_version(controls, live_pos, atr_locked)
+    if (
+        controls.get("tsl_active")
+        and safe_int(controls.get("tsl_position_version"), -1)
+        != safe_int(controls.get("position_version"), 0)
+    ):
+        logging.warning(
+            "Ignoring stale TSL: owner_version=%s current_version=%s",
+            controls.get("tsl_position_version"), controls.get("position_version"),
+        )
+        controls["tsl_active"] = False
+        controls["tsl_stop"] = None
+        controls["tsl_activation_price"] = None
+        controls["tsl_position_version"] = None
     controls["adaptive_defense"] = adaptive_defense_snapshot(state, live_pos, sig, candles or [], structure)
 
     side = "LONG" if signed > 0 else "SHORT"
@@ -2992,6 +3034,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
                     avg, high, activation_price, TSL_TRAIL_PCT,
                 )
             controls["tsl_active"] = True
+            controls["tsl_position_version"] = controls.get("position_version")
         if controls.get("tsl_active"):
             controls["tsl_stop"] = high * (1 - TSL_TRAIL_PCT)
     else:
@@ -3014,6 +3057,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
                     avg, low, activation_price, TSL_TRAIL_PCT,
                 )
             controls["tsl_active"] = True
+            controls["tsl_position_version"] = controls.get("position_version")
         if controls.get("tsl_active"):
             controls["tsl_stop"] = low * (1 + TSL_TRAIL_PCT)
     return controls
@@ -3029,7 +3073,12 @@ def risk_exit_target_if_needed(live_pos: Dict[str, Any], controls: Dict[str, Any
         return None, None
     side = "LONG" if signed > 0 else "SHORT"
     atr_stop = controls.get("atr_stop")
-    tsl_stop = controls.get("tsl_stop") if controls.get("tsl_active") else None
+    tsl_owned = bool(
+        controls.get("tsl_active")
+        and safe_int(controls.get("tsl_position_version"), -1)
+        == safe_int(controls.get("position_version"), 0)
+    )
+    tsl_stop = controls.get("tsl_stop") if tsl_owned else None
     tp1_trigger = controls.get("tp1_trigger_price")
     tp1_done = bool(controls.get("tp1_done"))
     defense = controls.get("adaptive_defense") or {}
@@ -3282,6 +3331,7 @@ def reset_tsl_after_position_increase(state: Dict[str, Any], result: Dict[str, A
     pc["tsl_active"] = False
     pc["tsl_stop"] = None
     pc["tsl_activation_price"] = None
+    pc["tsl_position_version"] = None
     # Re-lock ATR and TP1 from the new blended position on the next cycle.
     pc["atr_at_entry"] = None
     pc["atr_entry_avg"] = avg if avg > 0 else None
@@ -4405,7 +4455,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v41_adaptive_entry_guard",
+        "version": "larry_perp_v42_tsl_position_ownership",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,

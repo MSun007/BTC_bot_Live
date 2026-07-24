@@ -36,6 +36,35 @@ class AdaptiveRiskTests(unittest.TestCase):
         self.assertEqual(controls["position_version"], first + 1)
         self.assertEqual(controls["position_reanchor"]["exchange_avg_entry"], 102)
 
+    def test_reversal_resets_trailing_stop_owned_by_prior_side(self):
+        controls = {
+            "position_version": 1, "position_fingerprint": "-1:65390.00000000",
+            "position_signed_contracts": -1, "position_avg_entry": 65390,
+            "lowest_price": 63760, "tsl_active": True, "tsl_stop": 64078,
+            "tsl_position_version": 1,
+        }
+        larry.update_position_version(
+            controls, {"signed_contracts": 4, "avg_entry_price": 64060}, 300
+        )
+        self.assertFalse(controls["tsl_active"])
+        self.assertIsNone(controls["tsl_stop"])
+        self.assertIsNone(controls["lowest_price"])
+        self.assertIsNone(controls["tsl_position_version"])
+
+    def test_same_side_reduction_preserves_and_reowns_trailing_stop(self):
+        controls = {
+            "position_version": 1, "position_fingerprint": "4:64060.00000000",
+            "position_signed_contracts": 4, "position_avg_entry": 64060,
+            "highest_price": 65100, "tsl_active": True, "tsl_stop": 64774,
+            "tsl_position_version": 1,
+        }
+        larry.update_position_version(
+            controls, {"signed_contracts": 2, "avg_entry_price": 64060}, 300
+        )
+        self.assertTrue(controls["tsl_active"])
+        self.assertEqual(controls["tsl_position_version"], 2)
+        self.assertEqual(controls["highest_price"], 65100)
+
     def test_adaptive_reduction_targets_lower_rung(self):
         controls = {"adaptive_defense": {"state": "REDUCE_ONE_RUNG"}}
         target, reason = larry.risk_exit_target_if_needed({"signed_contracts": 8}, controls, 100)
@@ -76,7 +105,7 @@ class AdaptiveRiskTests(unittest.TestCase):
         state = larry.default_engine_state()
         controls = state["position_controls"]
         controls.update({
-            "adaptive_entry_at": (larry.now_utc() - larry.timedelta(minutes=20)).isoformat(),
+            "adaptive_entry_at": (larry.now_utc() - larry.timedelta(minutes=30)).isoformat(),
             "adaptive_entry_price": 100,
             "atr_at_entry": 10,
             "adaptive_entry_baseline": {"score": 0, "factors": []},
@@ -86,17 +115,50 @@ class AdaptiveRiskTests(unittest.TestCase):
             candle(3, 91, 93, 90, 92), candle(4, 92, 94, 91, 93),
             candle(5, 93, 95, 92, 94), candle(6, 94, 104, 93, 98),
         ]
-        sig = larry.SignalSnapshot(103, 70, 2.0, 90, 95, 105, 10, 2, 0, 3, {}, {})
+        sig = larry.SignalSnapshot(106, 70, 2.0, 90, 95, 105, 10, 2, 0, 3, {}, {})
         first = larry.adaptive_defense_snapshot(
-            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars, {}
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars,
+            {"last_swing_high": {"price": 104}},
         )
         self.assertEqual(first["state"], "CONFIRMING")
-        self.assertGreaterEqual(first["adverse_atr"], 0.25)
+        self.assertGreaterEqual(first["adverse_atr"], 0.50)
         controls["adaptive_defense"] = first
         second = larry.adaptive_defense_snapshot(
-            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars, {}
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars,
+            {"last_swing_high": {"price": 104}},
         )
-        self.assertEqual(second["state"], "REDUCE_ONE_RUNG")
+        self.assertEqual(second["state"], "CONFIRMING")
+        controls["adaptive_defense"] = second
+        third = larry.adaptive_defense_snapshot(
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars,
+            {"last_swing_high": {"price": 104}},
+        )
+        self.assertEqual(third["state"], "EXIT")
+        self.assertEqual(third["confirm_cycles"], 3)
+
+    def test_stale_trailing_stop_cannot_exit_new_position_version(self):
+        controls = {
+            "position_version": 2, "tsl_position_version": 1,
+            "tsl_active": True, "tsl_stop": 99,
+            "atr_stop": 90, "adaptive_defense": {"state": "HOLD"},
+        }
+        target, reason = larry.risk_exit_target_if_needed(
+            {"signed_contracts": 4}, controls, 98
+        )
+        self.assertIsNone(target)
+        self.assertIsNone(reason)
+
+    def test_current_position_trailing_stop_still_exits(self):
+        controls = {
+            "position_version": 2, "tsl_position_version": 2,
+            "tsl_active": True, "tsl_stop": 99,
+            "atr_stop": 90, "adaptive_defense": {"state": "HOLD"},
+        }
+        target, reason = larry.risk_exit_target_if_needed(
+            {"signed_contracts": 4}, controls, 98
+        )
+        self.assertEqual(target, 0)
+        self.assertEqual(reason, "TSL_STOP_LONG")
 
     def test_firm_atr_stop_has_priority(self):
         controls = {"atr_stop": 95, "adaptive_defense": {"state": "REDUCE_ONE_RUNG"}}
