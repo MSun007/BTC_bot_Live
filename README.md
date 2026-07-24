@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v39_stable_gcs_retry
+larry_perp_v40_coinbase_read_resilience
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -380,21 +380,24 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-The v39 stability release retains all v35 trading behavior, bounded critical
-read/write retries, fail-soft startup telemetry and cadence-aware loop timing.
-It removes the incompatible shared GCS cycle cap that caused normal multi-object
-storage work to fail during `SAVING_ENGINE_STATE`.
+The v40 resilience release retains all v39 trading and GCS behavior and adds
+bounded retries around Coinbase read-only requests. Transient 429, 5xx, timeout
+and connection failures receive up to three attempts with exponential backoff.
+Authentication and other non-transient failures are not retried. Order
+submissions remain single-attempt and continue to use client-order-ID
+reconciliation rather than blind retry. Repeated outage alerts are throttled,
+and Larry sends a recovery notification after the next successful full cycle.
 
 Production deployment (July 23, 2026):
 
-- Release commit: `b4e9089`
+- Release commit: `4fefbf8`
 - Engine service: `larry-perp.service` active on `btc-perp-bot`
-- Engine state: `larry_perp_v39_stable_gcs_retry`
+- Engine state: `larry_perp_v40_coinbase_read_resilience`
 - Exchange position at deployment and verification: `FLAT`
-- First completed cycle: healthy, dashboard state saved, no GCS-budget error
-- Observed first-cycle duration: 131.24 seconds due to slow GCS CLI calls
-- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v39_20260723_1136`
-- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v39_20260723_1136.json`
+- First two completed cycles: healthy, dashboard state saved, no errors
+- Regression suite: 18 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v40_20260723_2002`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v40_20260723_2000.json`
 
 The v35 fresh-setup guard preserves the v34 ownership, re-anchoring, ATR,
 profit-taking and adaptive-defence improvements while fixing the churn path
