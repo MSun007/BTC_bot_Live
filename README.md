@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v41_adaptive_entry_guard
+larry_perp_v42_tsl_position_ownership
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -60,7 +60,7 @@ Each unique combination of signed contracts and exchange average creates a new *
 - Re-anchoring timestamp
 - Verification status
 
-After a same-direction increase, Larry clears the previous trailing watermark and rebuilds the ATR, TP and trailing controls from the new blended average. This prevents an enlarged position from inheriting a stale stop or high/low watermark.
+Trailing stops and high/low watermarks are owned by a specific position version. A fresh entry, direction flip, or changed Coinbase average clears the prior trailing state. A same-side quantity-only reduction preserves a valid trailing stop and transfers its ownership to the new version.
 
 Position-event rules:
 
@@ -104,10 +104,15 @@ Current live actions:
 
 | Score/state | Response |
 |---|---|
-| Below 65 | `HOLD` |
-| 65–84 for two consecutive cycles | Reduce one conviction rung |
-| 85+ for two consecutive cycles | Exit the position |
+| Below 75 | `HOLD` |
+| 75–84 for three consecutive cycles | Reduce one conviction rung |
+| 85+ for three consecutive cycles | Exit the position |
 | Firm ATR stop crossed | Exit immediately |
+
+Ordinary adaptive defence also requires the position to be at least 20 minutes
+old and at least 0.50 locked ATR adverse. During that grace period, only the
+existing structure-break plus adverse-volume emergency can qualify. The firm
+1.5 ATR stop remains active immediately.
 
 An adaptive reduction or exit creates a 15-minute minimum re-entry cooldown.
 Beginning with v35, elapsed time is not sufficient to authorize the same side
@@ -379,6 +384,37 @@ Before changing production files:
 After each material strategy change, update this README, configuration notes, tests and dashboard labels together.
 
 ## Current production release
+
+The v42 release corrects the premature trailing-stop exit observed after the
+July 24 short-to-long reversal. The new long had inherited the prior short's
+profitable low watermark and trailing-stop state, allowing a stop belonging to
+the old position to close the new one.
+
+- Every TSL now carries `tsl_position_version`.
+- Reversal, fresh-entry and changed-average events clear the old TSL and
+  watermark before the new position is managed.
+- Same-side partial reductions preserve a valid TSL and reassign it to the new
+  quantity version.
+- Exit evaluation ignores a TSL whose owner version does not match the current
+  position.
+- Adaptive reduction now requires score 75, three confirmations, 20 minutes of
+  position age and 0.50 ATR adverse excursion.
+- The firm 1.5 ATR stop and the structure-plus-volume grace-period emergency
+  remain unchanged.
+
+Production deployment (July 24, 2026):
+
+- Release commit: `abfef18`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v42_tsl_position_ownership`
+- Exchange position before, during and after deployment: `FLAT 0`
+- First completed cycle: healthy at 14:56:36 UTC; no order attempted
+- Regression suite: 25 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v42_20260724_1053`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v42_20260724_1053.json`
+- Local backup: `LIVE PLATFORM/backup_pre_tsl_position_ownership_20260724_1048`
+
+### Prior v41 release
 
 The v41 adaptive-entry guard retains the v40 Coinbase/GCS resilience and
 corrects fee-heavy defensive reductions immediately after entry:
