@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v40_coinbase_read_resilience
+larry_perp_v41_adaptive_entry_guard
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -380,24 +380,30 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-The v40 resilience release retains all v39 trading and GCS behavior and adds
-bounded retries around Coinbase read-only requests. Transient 429, 5xx, timeout
-and connection failures receive up to three attempts with exponential backoff.
-Authentication and other non-transient failures are not retried. Order
-submissions remain single-attempt and continue to use client-order-ID
-reconciliation rather than blind retry. Repeated outage alerts are throttled,
-and Larry sends a recovery notification after the next successful full cycle.
+The v41 adaptive-entry guard retains the v40 Coinbase/GCS resilience and
+corrects fee-heavy defensive reductions immediately after entry:
 
-Production deployment (July 23, 2026):
+- Ordinary adaptive defence waits 10 minutes and at least 0.25 ATR of adverse
+  post-entry movement. The firm 1.5 ATR stop remains active immediately.
+- During the grace period, only a confirmed structure break combined with
+  adverse volume expansion can qualify as an emergency.
+- Entry-time evidence is baselined so pre-entry conditions alone cannot
+  immediately invalidate the accepted setup.
+- The first adaptive cut halves exposure (`4 -> 2`) instead of jumping directly
+  from the lowest conviction rung to the one-contract runner (`4 -> 1`).
+- `REVERSAL_PROBE_CONTRACTS` is authoritative on both signal lock and execution;
+  the current production setting is two contracts.
 
-- Release commit: `4fefbf8`
+Production deployment (July 24, 2026):
+
+- Release commit: `a4b0723`
 - Engine service: `larry-perp.service` active on `btc-perp-bot`
-- Engine state: `larry_perp_v40_coinbase_read_resilience`
-- Exchange position at deployment and verification: `FLAT`
-- First two completed cycles: healthy, dashboard state saved, no errors
-- Regression suite: 18 tests passed locally and in Cloud Shell
-- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v40_20260723_2002`
-- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v40_20260723_2000.json`
+- Engine state: `larry_perp_v41_adaptive_entry_guard`
+- Exchange position at deployment: existing `SHORT 1`; reconciled without an order
+- First completed cycle: healthy; dashboard state saved and normal TSL activated
+- Regression suite: 21 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v41_20260724_0906`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v41_20260724_0905.json`
 
 The v35 fresh-setup guard preserves the v34 ownership, re-anchoring, ATR,
 profit-taking and adaptive-defence improvements while fixing the churn path
