@@ -1341,7 +1341,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v42_tsl_position_ownership",
+        "version": "larry_perp_v43_fee_control_integrity",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -2971,6 +2971,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
     state["market_structure"] = structure
 
     if signed == 0 or price <= 0 or avg <= 0:
+        state["add_on_state"] = default_engine_state()["add_on_state"]
         controls.update({
             "highest_price": None, "lowest_price": None,
             "atr_stop": None, "atr_at_entry": None, "atr_entry_avg": None,
@@ -3994,6 +3995,11 @@ def record_progressive_add(state: Dict[str, Any], result: Dict[str, Any], decisi
     after = result.get("after") or {}
     before_signed = safe_int(before.get("signed_contracts"), 0)
     after_signed = safe_int(after.get("signed_contracts"), 0)
+    if before_signed == 0 or (before_signed > 0) != (after_signed > 0):
+        # A fresh entry or reversal establishes a new position; it is not an
+        # add-on and must start with a clean extension allowance.
+        state["add_on_state"] = default_engine_state()["add_on_state"]
+        return
     if abs(after_signed) <= abs(before_signed):
         return
     add_state = state.setdefault("add_on_state", default_engine_state().get("add_on_state", {}))
@@ -4455,7 +4461,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v42_tsl_position_ownership",
+        "version": "larry_perp_v43_fee_control_integrity",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4552,6 +4558,9 @@ def run_once(cb: Any, gcs: GCS) -> None:
     strategy_cfg = load_strategy_config(gcs)
     apply_strategy_config(strategy_cfg)
     state["active_strategy_config"] = strategy_cfg
+    # The cooldown duration is live configuration, not historical position
+    # state. Replace the persisted value every cycle so config changes apply.
+    state.setdefault("cooldowns", {})["min_seconds"] = MIN_ENTRY_COOLDOWN_SECONDS
     # v21 reporting-only cleanup: blocked-action messages are per-cycle diagnostics,
     # not persistent state. Clearing them here prevents stale manual/target-size
     # warnings from staying on the dashboard after Larry is flat.

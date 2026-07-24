@@ -65,6 +65,58 @@ class AdaptiveRiskTests(unittest.TestCase):
         self.assertEqual(controls["tsl_position_version"], 2)
         self.assertEqual(controls["highest_price"], 65100)
 
+    def test_fresh_entry_does_not_consume_add_allowance(self):
+        state = larry.default_engine_state()
+        larry.record_progressive_add(
+            state,
+            {"ok": True, "before": {"signed_contracts": 0},
+             "after": {"signed_contracts": 4, "side": "LONG", "avg_entry_price": 100}},
+            {"confidence_pct": 58},
+        )
+        self.assertEqual(state["add_on_state"]["adds_count"], 0)
+
+    def test_same_side_increase_counts_as_one_add(self):
+        state = larry.default_engine_state()
+        larry.record_progressive_add(
+            state,
+            {"ok": True, "before": {"signed_contracts": 4},
+             "after": {"signed_contracts": 8, "side": "LONG", "avg_entry_price": 101}},
+            {"confidence_pct": 92},
+        )
+        self.assertEqual(state["add_on_state"]["adds_count"], 1)
+
+    def test_one_real_add_is_allowed_then_second_is_blocked(self):
+        prior_max = larry.MAX_POSITION_ADDS
+        prior_improvement = larry.MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD
+        try:
+            larry.MAX_POSITION_ADDS = 1
+            larry.MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = 25
+            state = larry.default_engine_state()
+            allowed, _ = larry.should_allow_progressive_add(
+                state, 4, 8, {"confidence_pct": 92}
+            )
+            self.assertTrue(allowed)
+            state["add_on_state"].update(
+                {"adds_count": 1, "last_add_confidence_pct": 92}
+            )
+            allowed, reason = larry.should_allow_progressive_add(
+                state, 8, 14, {"confidence_pct": 100}
+            )
+            self.assertFalse(allowed)
+            self.assertIn("max_position_adds_reached", reason)
+        finally:
+            larry.MAX_POSITION_ADDS = prior_max
+            larry.MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = prior_improvement
+
+    def test_flat_position_resets_add_allowance(self):
+        state = larry.default_engine_state()
+        state["add_on_state"]["adds_count"] = 1
+        sig = larry.SignalSnapshot(100, 50, .5, 90, 100, 110, 4, 1, 0, 0, {}, {})
+        larry.update_position_risk_controls(
+            state, {"signed_contracts": 0, "avg_entry_price": 0}, sig, []
+        )
+        self.assertEqual(state["add_on_state"]["adds_count"], 0)
+
     def test_adaptive_reduction_targets_lower_rung(self):
         controls = {"adaptive_defense": {"state": "REDUCE_ONE_RUNG"}}
         target, reason = larry.risk_exit_target_if_needed({"signed_contracts": 8}, controls, 100)
