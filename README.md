@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v43_fee_control_integrity
+larry_perp_v44_observability_reliability
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -191,6 +191,7 @@ The Cloud Run dashboard is designed for desktop and mobile operation. The Positi
 - `AUTO-MANAGED`: Larry has verified ownership and may execute exits and adjustments.
 - `NOT MANAGED`: Larry can display calculated levels but will not submit orders for the position.
 - `FLAT`: Coinbase reports no open futures position.
+- `UNVERIFIED`: Coinbase did not confirm the position; the dashboard must not infer that the account is flat.
 
 The Larry Decision Pipeline displays:
 
@@ -205,6 +206,26 @@ The Larry Decision Pipeline displays:
 - Post-stop state and shadow scores
 
 The dashboard also provides Larry-only performance accounting, benchmark comparison, trade maps, realized P&L, drawdown, execution diagnostics, configuration visibility and emergency controls.
+
+## v44 observability and Coinbase reliability
+
+v44 is an operational release. It does **not** change entry thresholds, conviction sizing, leverage limits, profit targets, ATR stops, trailing stops, Adaptive Defence thresholds, manual-position ownership rules or emergency-flatten behavior.
+
+Before every actual order, Larry now creates one structured `TRADE_DECISION` record containing the current and target position, action and quantity, signal scores, macro and funding context, risk controls, Adaptive Defence state and evidence. The same decision identifier and context flow into journal logs, engine state, trade-ledger metadata and trade notifications. No-op target plans do not create trade decisions.
+
+Coinbase read handling is bounded and fail-closed:
+
+- Read-only 408/425/429/5xx and network failures receive at most two short attempts.
+- The exact Coinbase `User does not have access to portfolio` 403 response receives the same bounded read-only retry and causes the client to be rebuilt for the next cycle.
+- A 401 is not retried with the same client; the client is rebuilt for the next cycle.
+- Unrelated 403 responses are not classified as transient.
+- Order submissions are never automatically retried.
+- The first exchange-read outage cycle is logged without Telegram noise; alerts begin after consecutive failures and are cooldown-deduplicated.
+- A Coinbase failure during process startup no longer terminates the service. Larry enters the normal loop with the position marked unverified and remains fail-closed until reconciliation succeeds.
+
+The dashboard exposes live position-read health. Only a successful Coinbase futures-position response may produce `POSITION FLAT`. A failed response produces `POSITION UNVERIFIED`, an operator warning and an unavailable-position row instead of silently converting the error to an empty/flat position.
+
+GCS missing-object handling is limited to `gcloud storage cat` reads of new state/log partitions. Failed write/copy commands are never suppressed as missing-file conditions.
 
 ## Manual positions and ownership
 
@@ -333,6 +354,9 @@ The current tests verify:
 - Opposite-side setups are not blocked by the same-side guard
 - Critical GCS reads retry after a transient failure
 - Exhausted GCS cycle budgets fail fast
+- Known portfolio-access 403 failures are bounded/retryable for reads
+- Unrelated 403 failures remain fail-closed
+- No-op target plans do not emit trade-decision records
 
 Also run syntax checks before deployment:
 
@@ -364,7 +388,7 @@ Production verification should include:
 
 ```text
 Service: active
-Engine: larry_perp_v34_authority_cleanup
+Engine: larry_perp_v44_observability_reliability
 Exchange position: expected side and quantity
 Dashboard feed: current
 Cloud Run revision: healthy

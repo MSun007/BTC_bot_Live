@@ -413,6 +413,48 @@ class AdaptiveRiskTests(unittest.TestCase):
         finally:
             larry.COINBASE_READ_BACKOFF_SECONDS = original_backoff
 
+    def test_portfolio_access_403_is_retryable_for_reads_and_rebuilds_client(self):
+        class Response:
+            status_code = 403
+
+        class PortfolioError(Exception):
+            response = Response()
+
+        exc = PortfolioError(
+            '{"error":"PERMISSION_DENIED","message":"User does not have access to portfolio"}'
+        )
+        self.assertTrue(larry.is_transient_coinbase_error(exc))
+        self.assertTrue(larry.should_rebuild_coinbase_client(exc))
+
+    def test_unrelated_403_is_not_treated_as_transient(self):
+        class Response:
+            status_code = 403
+
+        class ForbiddenError(Exception):
+            response = Response()
+
+        exc = ForbiddenError("Forbidden by policy")
+        self.assertFalse(larry.is_transient_coinbase_error(exc))
+        self.assertFalse(larry.should_rebuild_coinbase_client(exc))
+
+    def test_noop_target_does_not_emit_trade_decision(self):
+        original_get_position = larry.get_live_net_position
+        original_build_decision = larry.build_trade_decision
+        calls = []
+        try:
+            larry.get_live_net_position = lambda _cb: {
+                "side": "FLAT", "contracts": 0, "signed_contracts": 0,
+                "avg_entry_price": 0, "current_price": 0,
+            }
+            larry.build_trade_decision = lambda *_args: calls.append(True)
+            result = larry.execute_target(object(), object(), 0, "NOOP_TEST")
+            self.assertTrue(result["ok"])
+            self.assertIsNone(result["order"])
+            self.assertEqual(calls, [])
+        finally:
+            larry.get_live_net_position = original_get_position
+            larry.build_trade_decision = original_build_decision
+
 
 if __name__ == "__main__":
     unittest.main()

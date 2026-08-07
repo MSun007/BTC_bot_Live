@@ -275,6 +275,12 @@ DEFAULT_CONFIG = {
 
 _secrets: Optional[Dict[str, str]] = None
 _cb: Optional[RESTClient] = None
+_futures_position_read_status: Dict[str, Any] = {
+    "position_verified": False,
+    "status": "UNKNOWN",
+    "verified_at": None,
+    "error": "No Coinbase futures-position read has completed yet.",
+}
 _fs: Optional[gcsfs.GCSFileSystem] = None
 _cache: Dict[str, Any] = {}
 
@@ -1419,6 +1425,7 @@ def futures_balance() -> Dict[str, Any]:
 
 
 def futures_positions(perp_product: str, contract_size: float) -> List[Dict[str, Any]]:
+    global _cb, _futures_position_read_status
     try:
         resp = cb().list_futures_positions()
         rows = getattr(resp, "positions", None) or attr_or_key(resp, "positions", []) or []
@@ -1446,8 +1453,26 @@ def futures_positions(perp_product: str, contract_size: float) -> List[Dict[str,
                 "daily_realized_pnl": safe_float(attr_or_key(p, "daily_realized_pnl"), 0),
                 "expiration_time": attr_or_key(p, "expiration_time"),
             })
+        _futures_position_read_status = {
+            "position_verified": True,
+            "status": "VERIFIED",
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "error": None,
+        }
         return out
-    except Exception:
+    except Exception as exc:
+        # An empty list means flat only after a successful Coinbase response.
+        # On an API failure, publish UNKNOWN so the dashboard never presents a
+        # potentially open account as safely flat. Rebuild the client next poll.
+        _futures_position_read_status = {
+            "position_verified": False,
+            "status": "UNAVAILABLE",
+            "verified_at": None,
+            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "error": str(exc)[:300],
+        }
+        _cb = None
+        app.logger.warning("Coinbase futures position read failed; position is UNKNOWN: %s", exc)
         return []
 
 
@@ -2678,6 +2703,7 @@ def api_data():
         contract_size = safe_float(perp_meta.get("contract_size"), safe_float(cfg.get("CONTRACT_SIZE_BTC"), 0.01)) or 0.01
         cap = load_capital_state()
         ex_positions = futures_positions(perp_product, contract_size)  # live Coinbase position is source of truth
+        exchange_api_health = dict(_futures_position_read_status)
         tracking_start = cap.get("tracking_start_timestamp")
         fills = recent_fills(perp_product, 100, tracking_start)
         current_mark = 0.0
@@ -2769,6 +2795,10 @@ def api_data():
             warnings.append("Capital baseline is not set. Use /api/set_capital_baseline once the account state looks correct.")
         if heartbeat.get("health") != "LIVE":
             warnings.append(f"Bot heartbeat is {heartbeat.get('health')}.")
+        if not exchange_api_health.get("position_verified"):
+            warnings.append(
+                "Coinbase futures position is UNVERIFIED. The dashboard will not infer FLAT until a live position read succeeds."
+            )
         # v39: a fresh heartbeat can still carry state=ERROR if the bot's last loop hit
         # an exception. Surface that as an operator warning instead of only showing a
         # cryptic red ERROR pill in the command center.
@@ -2808,6 +2838,7 @@ def api_data():
             "performance_analytics": performance_analytics,
             "clean_book": clean_book,
             "futures_positions": ex_positions,
+            "exchange_api_health": exchange_api_health,
             "authoritative_position_source": "Coinbase live futures_positions/exchange_position only; historical last_execution_result is never a current-position source",
             "fills": fills,
             "spot_strategy": spot_state,
@@ -4532,18 +4563,19 @@ function renderLarryAccounting(d){
 function renderLarryMindset(d){
  const es=d.engine_state||{}, diag=es.entry_diagnostics||es.last_entry_diagnostics||d.entry_diagnostics||{}, cfg=d.config||{}, mg=es.manual_position_status||{};
  const pr=d.position_risk||{}, pc=es.position_controls||{}, ph=es.phantom||es.signal_lifecycle||{};
- const pos=es.exchange_position||d.exchange_position||{};
+ const positionVerified=(d.exchange_api_health||{}).position_verified===true;
+ const pos=positionVerified?((d.futures_positions&&d.futures_positions[0])||{}):{};
  const ls=Number(diag.long_score||0), ss=Number(diag.short_score||0), best=Math.max(ls,ss);
  const direction=ls>ss?'LONG':ss>ls?'SHORT':(pr.side||pos.side||'NEUTRAL');
  const arm=Number(diag.signal_arm_score||cfg.SIGNAL_ARM_SCORE||2), commit=Number(diag.signal_commit_score||cfg.SIGNAL_COMMIT_SCORE||3);
  const contracts=Math.abs(Number(pr.contracts||pos.contracts||pos.number_of_contracts||0));
- const hasPosition=pr.has_position===true||contracts>0;
+ const hasPosition=positionVerified&&(pr.has_position===true||contracts>0);
  const autoManaged=hasPosition && mg.bot_managed===true && mg.allow_bot_to_trade_position===true;
  const authority=$('managementAlert');
- if(authority) authority.className='management-alert '+(!hasPosition?'flat':autoManaged?'managed':'unmanaged');
- set('managementTitle',!hasPosition?'No open futures position':autoManaged?'Larry owns and manages this position':'Open position is monitor-only');
- set('managementNote',!hasPosition?'Coinbase is flat. Larry may enter when its strategy and risk gates permit.':autoManaged?'Automated ATR, trailing-stop, profit-taking and adaptive exits are authorized for this exact exchange position.':'Larry can display calculated risk levels but will not submit exits, additions or reversals. Use Coinbase or Emergency Close Futures to manage this exposure.');
- set('managementBadge',!hasPosition?'FLAT':autoManaged?'AUTO-MANAGED':'NOT MANAGED');
+ if(authority) authority.className='management-alert '+(!positionVerified?'unmanaged':!hasPosition?'flat':autoManaged?'managed':'unmanaged');
+ set('managementTitle',!positionVerified?'Exchange position unverified':!hasPosition?'No open futures position':autoManaged?'Larry owns and manages this position':'Open position is monitor-only');
+ set('managementNote',!positionVerified?'Coinbase position verification failed. Larry is fail-closed; do not interpret this as flat.':!hasPosition?'Coinbase is flat. Larry may enter when its strategy and risk gates permit.':autoManaged?'Automated ATR, trailing-stop, profit-taking and adaptive exits are authorized for this exact exchange position.':'Larry can display calculated risk levels but will not submit exits, additions or reversals. Use Coinbase or Emergency Close Futures to manage this exposure.');
+ set('managementBadge',!positionVerified?'UNVERIFIED':!hasPosition?'FLAT':autoManaged?'AUTO-MANAGED':'NOT MANAGED');
  const riskOk=(es.risk_gate||{}).entries_allowed!==false, macroOpen=diag.macro_gate_open!==false;
  const fundingOk=direction==='SHORT'?diag.funding_short_ok!==false:diag.funding_long_ok!==false;
  const lifecycle=String(ph.state||'MONITORING').toUpperCase();
@@ -4552,7 +4584,8 @@ function renderLarryMindset(d){
  const tier=target>=maxN?'FULL':target>=strong?'STRONG':target>=partial?'PARTIAL':target>0?'PROBE':'WAITING';
  let decision='WATCHING — waiting for a qualified setup', reason=diag.explanation||diag.next_action||'Larry is monitoring the next closed-candle signal.', badge='WATCHING', badgeClass='';
  let activeStep='mindsetTriggerStep';
- if(!riskOk){decision='BLOCKED — risk gate is closed';reason=(es.risk_gate||{}).reason||'New entries are disabled by the active risk gate.';badge='BLOCKED';badgeClass='bad';activeStep='mindsetRegimeStep';}
+ if(!positionVerified){decision='PAUSED — exchange position unverified';reason='Larry cannot safely make a position decision until Coinbase confirms the live futures position.';badge='UNVERIFIED';badgeClass='bad';activeStep='mindsetExitStep';}
+ else if(!riskOk){decision='BLOCKED — risk gate is closed';reason=(es.risk_gate||{}).reason||'New entries are disabled by the active risk gate.';badge='BLOCKED';badgeClass='bad';activeStep='mindsetRegimeStep';}
  else if(hasPosition){
    activeStep='mindsetExitStep';
    if(!autoManaged){decision=`UNMANAGED ${pr.side||direction} — monitor only`;reason='Larry does not have execution authority for this position. Any displayed stop or target is informational and will not execute.';badge='MONITOR ONLY';badgeClass='bad';}
@@ -4840,13 +4873,14 @@ async function refresh(){try{const r=await fetch('/api/data?ts='+Date.now(),{cac
  // v78: global data-freshness in the header — is the feed live? (was buried in System Health)
  const _age=((d.risk_intelligence||{}).health||{}).heartbeat_age_secs; const _fresh=(_age==null)?'':' · feed '+(_age<=120?'●':'○')+' '+_age+'s';
  set('serverTime',(d.server_time||'—')+_fresh); set('dashboardRefresh','Dashboard refreshed '+new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit'})); set('productLine',`${cfg.SPOT_PRODUCT_ID||'BTC-USDC'} · ${cfg.PERP_PRODUCT_ID||'BIP-20DEC30-CDE'}`);
- const es=d.engine_state||{}, xp=es.exchange_position||{}, fp=(d.futures_positions&&d.futures_positions[0])||{};
+ const es=d.engine_state||{}, xp=es.exchange_position||{}, fp=(d.futures_positions&&d.futures_positions[0])||{}, exchangeHealth=d.exchange_api_health||{};
  const hbState=String(hb.state||'UNKNOWN').toUpperCase();
  const botLoopError = hbState==='ERROR';
  const botLabel = 'BOT '+(hb.health||'—')+(botLoopError?' · LOOP ERROR':'');
  pill('botHealth', botLabel, botLoopError?'bad':(hb.color==='good'?'good':hb.color==='warn'?'warn':'bad'));
- const posSide=(xp.side||fp.side||'FLAT'); const posContracts=(xp.contracts ?? fp.contracts ?? 0);
- pill('botState', posSide==='FLAT'?'POSITION FLAT':`POSITION ${posSide} ${posContracts}`, posSide==='FLAT'?'good':'warn');
+ const positionVerified=exchangeHealth.position_verified===true;
+ const posSide=positionVerified?(fp.side||'FLAT'):'UNKNOWN'; const posContracts=positionVerified?(fp.contracts??0):null;
+ pill('botState', !positionVerified?'POSITION UNVERIFIED':(posSide==='FLAT'?'POSITION FLAT':`POSITION ${posSide} ${posContracts}`), !positionVerified?'bad':(posSide==='FLAT'?'good':'warn'));
  const macroLabel=(mac.regime||'MACRO')+' · '+(mac.gate_open?'MACRO OPEN':'MACRO BLOCK');
  pill('macroPill', macroLabel, mac.gate_open===true?'good':mac.regime==='UNKNOWN'?'warn':'bad');
  pill('sessionPill',pm.session_open===false?'EXCHANGE CLOSED':pm.session_open===true?'EXCHANGE OPEN':'EXCHANGE —',pm.session_open===false?'warn':'good');
@@ -4858,7 +4892,7 @@ async function refresh(){try{const r=await fetch('/api/data?ts='+Date.now(),{cac
  // v76 fix: this note previously said "Risk gate status loading…" forever -- no code ever populated it.
  const _rg=d.risk_gate||{}; set('larryRiskGateNote', _rg.entries_allowed===false ? ((_rg.headline||'Risk gate blocked')+' — '+(_rg.reason||'see entry diagnostics')) : ('Risk gate open — daily stop hits '+(_rg.daily_stop_hits??0)+', loss streak '+(_rg.loss_streak??0)+'.'));
  set('atrStop',(cfg.ATR_STOP_MULTIPLIER||1.5)+'x ATR'); set('tslAct',pct((cfg.TSL_ACTIVATION_PCT||0)*100)); set('tslTrail',pct((cfg.TSL_TRAIL_PCT||0)*100)); set('configSource',cfg.CONFIG_SOURCE||'—'); setControlValues(cfg);
- const pos=d.futures_positions||[]; $('perpPosBody').innerHTML=pos.length?pos.map(p=>`<tr><td class="${p.side==='LONG'?'good':'bad'}">${p.side}</td><td>${num(p.contracts,0)}</td><td>${num(p.btc_exposure,4)} BTC</td><td>$${num(p.avg_entry_price,2)}</td><td>$${num(p.current_price,2)}</td><td class="${cls(p.book_unrealized_pnl ?? p.exchange_unrealized_pnl)}">${usd(p.book_unrealized_pnl ?? p.exchange_unrealized_pnl)}</td><td>${p.cost_basis_source||'coinbase_api'}</td></tr>`).join(''):'<tr><td colspan="7" class="muted">No open futures position</td></tr>';
+ const pos=d.futures_positions||[]; $('perpPosBody').innerHTML=!positionVerified?'<tr><td colspan="7" class="bad">Position unavailable — Coinbase verification failed</td></tr>':(pos.length?pos.map(p=>`<tr><td class="${p.side==='LONG'?'good':'bad'}">${p.side}</td><td>${num(p.contracts,0)}</td><td>${num(p.btc_exposure,4)} BTC</td><td>$${num(p.avg_entry_price,2)}</td><td>$${num(p.current_price,2)}</td><td class="${cls(p.book_unrealized_pnl ?? p.exchange_unrealized_pnl)}">${usd(p.book_unrealized_pnl ?? p.exchange_unrealized_pnl)}</td><td>${p.cost_basis_source||'coinbase_api'}</td></tr>`).join(''):'<tr><td colspan="7" class="muted">No open futures position</td></tr>');
  // v60: deprecated Perp Strategy Stack and Spot Entry Ladder cards removed from the main mobile view.
  // Current live exposure is shown only from Coinbase live futures_positions / exchange_position.
  // Spot trading is disabled and spot ladder diagnostics are intentionally hidden to avoid stale/empty panels.

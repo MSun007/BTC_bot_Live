@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Larry Perp v12 Clean — Coinbase Spot + Perp Portfolio Engine
+Larry Perp v44 — Observability + Reliability Release
 ==========================================================
 Exchange  : Coinbase Advanced Trade / FCM INTX-style BTC Perp product
 Product   : BIP-20DEC30-CDE
@@ -67,6 +67,24 @@ CHANGELOG v29 -> v30 (security/correctness audit fixes)
                        pause length; STREAK_PAUSE_MINUTES is always derived from it
                        (previously editing only "hours" on the dashboard could have
                        no effect on the actual pause duration).
+
+CHANGELOG v43 -> v44
+--------------------
+1. TRADE_DECISION - Structured pre-order decision records now feed journalctl,
+                    engine state, ledger raw metadata, email and Telegram.
+2. EMAIL_DETAIL   - Trade emails explain signal scores, macro/funding context,
+                    Adaptive Defense thresholds/evidence, ATR and TSL state.
+3. TELEGRAM_BRIEF - Trade alerts are concise while preserving action, position
+                    change, fill, reason and realized P&L.
+4. CB_RELIABILITY - Known transient portfolio 403, 429/5xx and network read
+                    failures use short bounded retries. A 401 rebuilds the
+                    client for the next cycle without retrying the same client.
+5. ALERT_DEDUP    - First transient Coinbase failure logs only; Telegram starts
+                    after consecutive failures and sends a recovery notice.
+6. GCS_NEW_FILE   - Missing daily JSONL objects are treated as normal first-write
+                    conditions rather than retried storage outages.
+7. API_TELEMETRY  - Engine state exposes API health, read attempts, cycle runtime,
+                    last verified position time and last trade decision.
 
 CHANGELOG v30 -> v31
 --------------------
@@ -306,8 +324,11 @@ GCS_COMMAND_TIMEOUT_SECONDS = float(os.getenv("GCS_COMMAND_TIMEOUT_SECONDS", "30
 GCS_CYCLE_IO_BUDGET_SECONDS = float(os.getenv("GCS_CYCLE_IO_BUDGET_SECONDS", "0"))
 GCS_READ_ATTEMPTS = int(os.getenv("GCS_READ_ATTEMPTS", "2"))
 GCS_WRITE_ATTEMPTS = int(os.getenv("GCS_WRITE_ATTEMPTS", "3"))
-COINBASE_READ_ATTEMPTS = max(1, int(os.getenv("COINBASE_READ_ATTEMPTS", "3")))
-COINBASE_READ_BACKOFF_SECONDS = max(0.0, float(os.getenv("COINBASE_READ_BACKOFF_SECONDS", "1.0")))
+COINBASE_READ_ATTEMPTS = max(1, int(os.getenv("COINBASE_READ_ATTEMPTS", "2")))
+COINBASE_READ_BACKOFF_SECONDS = max(0.0, float(os.getenv("COINBASE_READ_BACKOFF_SECONDS", "0.5")))
+COINBASE_READ_BUDGET_SECONDS = max(2.0, float(os.getenv("COINBASE_READ_BUDGET_SECONDS", "8")))
+COINBASE_ALERT_AFTER_FAILURES = max(1, int(os.getenv("COINBASE_ALERT_AFTER_FAILURES", "2")))
+COINBASE_CRITICAL_UNVERIFIED_SECONDS = max(60.0, float(os.getenv("COINBASE_CRITICAL_UNVERIFIED_SECONDS", "300")))
 COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS = max(
     60.0, float(os.getenv("COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS", "1800"))
 )
@@ -480,7 +501,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v21_reporting_only")
+log = logging.getLogger("larry_perp_v44_observability_reliability")
 
 # =============================================================================
 # UTILITIES
@@ -681,6 +702,15 @@ class GCS:
             try:
                 res = self._run(cmd, input_text=input_text)
                 if res.returncode == 0:
+                    return res
+                missing_text = (res.stderr or "") + " " + (res.stdout or "")
+                is_storage_cat = len(cmd) >= 3 and cmd[0:3] == ["gcloud", "storage", "cat"]
+                if is_storage_cat and (
+                    "matched no objects or files" in missing_text.lower()
+                    or "no urls matched" in missing_text.lower()
+                ):
+                    # A missing object is normal only for reads of new daily
+                    # partitions. Never suppress a failed write/copy command.
                     return res
                 last_error = RuntimeError(res.stderr.strip() or res.stdout.strip() or f"gcloud storage exit {res.returncode}")
             except subprocess.TimeoutExpired as exc:
@@ -1097,23 +1127,39 @@ def stoch_rsi(values: List[float], rsi_period: int = 14, stoch_period: int = 14)
 _COINBASE_OUTAGE_ACTIVE = False
 _COINBASE_OUTAGE_STARTED_AT: Optional[str] = None
 _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
+_COINBASE_CONSECUTIVE_FAILURES = 0
+_COINBASE_LAST_SUCCESS_AT: Optional[str] = None
+_COINBASE_LAST_VERIFIED_POSITION_AT: Optional[str] = None
 
 
-def is_transient_coinbase_error(exc: BaseException) -> bool:
-    """Identify retry-safe failures for read-only Coinbase requests."""
+def coinbase_error_status(exc: BaseException) -> Optional[int]:
     response = getattr(exc, "response", None)
     status = getattr(response, "status_code", None)
     if status is None:
         status = getattr(exc, "status_code", None)
     try:
-        status_int = int(status) if status is not None else None
+        return int(status) if status is not None else None
     except (TypeError, ValueError):
-        status_int = None
-    if status_int == 429 or (status_int is not None and 500 <= status_int <= 599):
+        return None
+
+
+def is_transient_coinbase_error(exc: BaseException) -> bool:
+    """Identify retry-safe failures for read-only Coinbase requests.
+
+    Reads may retry; order submission remains single-shot. A 403 is retryable
+    only for Coinbase's known transient portfolio-access response. Other 403s
+    remain fail-closed because they may indicate a real permission problem.
+    """
+    status_int = coinbase_error_status(exc)
+    message = str(exc).lower()
+    portfolio_access_error = status_int == 403 and (
+        "does not have access to portfolio" in message
+        or ("permission_denied" in message and "portfolio" in message)
+    )
+    if status_int in (408, 425, 429) or portfolio_access_error or (status_int is not None and 500 <= status_int <= 599):
         return True
 
     name = type(exc).__name__.lower()
-    message = str(exc).lower()
     transient_names = ("connectionerror", "timeout", "remotedisconnected")
     transient_text = (
         "bad gateway", "gateway timeout", "connection aborted",
@@ -1123,25 +1169,52 @@ def is_transient_coinbase_error(exc: BaseException) -> bool:
     return any(token in name for token in transient_names) or any(token in message for token in transient_text)
 
 
+def should_rebuild_coinbase_client(exc: BaseException) -> bool:
+    """Refresh credentials after auth or the known portfolio-scope response."""
+    status_int = coinbase_error_status(exc)
+    message = str(exc).lower()
+    return status_int == 401 or (
+        status_int == 403
+        and (
+            "does not have access to portfolio" in message
+            or ("permission_denied" in message and "portfolio" in message)
+        )
+    )
+
+
 def coinbase_read(call_name: str, operation: Any) -> Any:
-    """Retry only read-only Coinbase calls; order submissions never use this."""
+    """Bounded retries for read-only Coinbase calls. Orders never use this wrapper."""
     last_error: Optional[BaseException] = None
+    started = time.monotonic()
     for attempt in range(1, COINBASE_READ_ATTEMPTS + 1):
         try:
-            return operation()
+            result = operation()
+            _CYCLE_CONTEXT.setdefault("coinbase_reads", []).append({
+                "call": call_name, "attempts": attempt,
+                "elapsed_seconds": round(time.monotonic() - started, 3), "ok": True,
+            })
+            return result
         except Exception as exc:
             last_error = exc
-            if not is_transient_coinbase_error(exc) or attempt >= COINBASE_READ_ATTEMPTS:
+            elapsed = time.monotonic() - started
+            retryable = is_transient_coinbase_error(exc)
+            if not retryable or attempt >= COINBASE_READ_ATTEMPTS or elapsed >= COINBASE_READ_BUDGET_SECONDS:
+                _CYCLE_CONTEXT.setdefault("coinbase_reads", []).append({
+                    "call": call_name, "attempts": attempt,
+                    "elapsed_seconds": round(elapsed, 3), "ok": False,
+                    "status": coinbase_error_status(exc), "error": str(exc)[:300],
+                })
                 raise
-            delay = COINBASE_READ_BACKOFF_SECONDS * (2 ** (attempt - 1))
+            delay = min(2.0, COINBASE_READ_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            remaining = COINBASE_READ_BUDGET_SECONDS - elapsed
+            delay = min(delay, max(0.0, remaining))
             log.warning(
-                "Transient Coinbase read failure for %s attempt %s/%s; retrying in %.2fs: %s",
-                call_name, attempt, COINBASE_READ_ATTEMPTS, delay, exc,
+                "Retryable Coinbase read failure call=%s attempt=%s/%s status=%s retry_in=%.2fs error=%s",
+                call_name, attempt, COINBASE_READ_ATTEMPTS, coinbase_error_status(exc), delay, exc,
             )
             if delay > 0:
                 time.sleep(delay)
     raise RuntimeError(f"Coinbase read failed without an exception: {call_name}") from last_error
-
 
 def get_product(cb: Any, product_id: str) -> Dict[str, Any]:
     return obj_to_dict(coinbase_read(f"get_product:{product_id}", lambda: cb.get_product(product_id)))
@@ -1341,7 +1414,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v43_fee_control_integrity",
+        "version": "larry_perp_v44_observability_reliability",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -2104,6 +2177,85 @@ def classify_trade_intent(plan: Dict[str, Any], signal_reason: str) -> Dict[str,
         "sizing_rung_after": ladder_rung_for_contracts(target_abs, ladder),
     }
 
+def build_trade_decision(plan: Dict[str, Any], reason: str, before: Dict[str, Any]) -> Dict[str, Any]:
+    """Create one structured explanation used by logs, state, email and Telegram."""
+    ctx = dict(_CYCLE_CONTEXT.get("decision_context") or {})
+    defense = dict(ctx.get("adaptive_defense") or {})
+    evidence = defense.get("evidence") or []
+    evidence_names = [str(item.get("factor")) for item in evidence if isinstance(item, dict) and item.get("factor")]
+    return {
+        "decision_id": f"decision-{int(time.time())}-{uuid.uuid4().hex[:8]}",
+        "decided_at": iso_utc(),
+        "reason": reason,
+        "phase": _CYCLE_CONTEXT.get("phase"),
+        "current_position": {
+            "side": before.get("side"), "contracts": before.get("contracts"),
+            "signed_contracts": before.get("signed_contracts"),
+            "avg_entry_price": before.get("avg_entry_price"),
+            "unrealized_pnl": before.get("unrealized_pnl"),
+        },
+        "target_position": {
+            "side": plan.get("target_side"), "contracts": plan.get("target_contracts"),
+            "signed_contracts": plan.get("target_signed"),
+        },
+        "order": {"action": plan.get("action"), "contracts": plan.get("contracts_needed")},
+        "signal": {
+            "price": ctx.get("price"), "long_score": ctx.get("long_score"),
+            "short_score": ctx.get("short_score"), "rsi": ctx.get("rsi"),
+            "stoch_rsi": ctx.get("stoch_rsi"), "volume_ratio": ctx.get("volume_ratio"),
+        },
+        "macro": ctx.get("macro") or {},
+        "funding": ctx.get("funding") or {},
+        "risk": {
+            "atr_at_entry": ctx.get("atr_at_entry"), "atr_stop": ctx.get("atr_stop"),
+            "tsl_active": ctx.get("tsl_active"), "tsl_stop": ctx.get("tsl_stop"),
+            "tp1_trigger_price": ctx.get("tp1_trigger_price"),
+            "position_age_seconds": defense.get("entry_age_seconds"),
+        },
+        "adaptive_defense": {
+            "enabled": defense.get("enabled"), "score": defense.get("score"),
+            "state": defense.get("state"), "reduce_threshold": ADAPTIVE_REDUCE_SCORE,
+            "exit_threshold": ADAPTIVE_EXIT_SCORE, "confirm_cycles": defense.get("confirm_cycles"),
+            "required_cycles": defense.get("required_cycles"), "adverse_atr": defense.get("adverse_atr"),
+            "minimum_adverse_atr": defense.get("minimum_adverse_atr"),
+            "evidence": evidence_names, "new_factors": defense.get("new_factors") or [],
+        },
+        "expected_post_position": f"{plan.get('expected_post_side')} {plan.get('expected_post_contracts')}",
+    }
+
+
+def log_trade_decision(decision: Dict[str, Any]) -> None:
+    ad = decision.get("adaptive_defense") or {}
+    signal = decision.get("signal") or {}
+    order = decision.get("order") or {}
+    current = decision.get("current_position") or {}
+    target = decision.get("target_position") or {}
+    log.warning(
+        "TRADE_DECISION id=%s reason=%s current=%s_%s target=%s_%s action=%s qty=%s "
+        "long_score=%s short_score=%s defense_score=%s reduce_threshold=%s exit_threshold=%s "
+        "evidence=%s",
+        decision.get("decision_id"), decision.get("reason"), current.get("side"), current.get("contracts"),
+        target.get("side"), target.get("contracts"), order.get("action"), order.get("contracts"),
+        signal.get("long_score"), signal.get("short_score"), ad.get("score"),
+        ad.get("reduce_threshold"), ad.get("exit_threshold"), ",".join(ad.get("evidence") or []) or "none",
+    )
+
+
+def concise_decision_reason(decision: Dict[str, Any]) -> str:
+    reason = str(decision.get("reason") or "TRADE")
+    ad = decision.get("adaptive_defense") or {}
+    if reason.startswith("ADAPTIVE_DEFENSE"):
+        evidence = ", ".join((ad.get("evidence") or [])[:2]) or "confirmed deterioration"
+        return f"Adaptive Defense {ad.get('score', '—')}/100 (threshold {ad.get('reduce_threshold', '—')}); {evidence}"
+    if reason.startswith("TP1"):
+        return "Profit target reached; stepping down one ladder rung"
+    if reason.startswith("TSL"):
+        return "Trailing stop reached"
+    if reason.startswith("ATR"):
+        return "Firm ATR stop reached"
+    return reason.replace("_", " ").title()
+
+
 def trade_emoji(reason: str, action: str, is_exit: bool) -> str:
     r = (reason or "").upper()
     a = (action or "").upper()
@@ -2121,59 +2273,38 @@ def trade_emoji(reason: str, action: str, is_exit: bool) -> str:
 
 
 def send_trade_telegram(result: Dict[str, Any]) -> None:
+    """Compact operator alert; full detail remains in email/state/journal."""
     try:
         plan = result.get("plan") or {}
         order = result.get("order") or {}
         before = result.get("before") or {}
         after = result.get("after") or {}
         fills = result.get("fills") or {}
+        decision = result.get("trade_decision") or {}
         if not result.get("ok") or not order or plan.get("action") in (None, "NONE"):
             return
         action = str(plan.get("action") or "—").upper()
         qty = safe_int(plan.get("contracts_needed"), 0)
-        signal_reason = result.get("signal_reason") or result.get("reason") or "TRADE"
-        execution_reason = result.get("execution_reason") or signal_reason
-        trade_intent = result.get("trade_intent") or "TRADE"
+        execution_reason = result.get("execution_reason") or result.get("reason") or "TRADE"
         fill_price = safe_float(fills.get("avg_price"), 0.0) or safe_float(before.get("current_price"), 0.0)
-        fees = safe_float(result.get("fees_usd"), safe_float(fills.get("commission"), 0.0))
         net = result.get("net_realized_pnl_usd")
-        gross = result.get("gross_realized_pnl_usd")
-        running = result.get("running_pnl_summary") or {}
-        running_net = running.get("net_realized_pnl_usd")
-        is_exit = bool(result.get("is_exit_trade"))
-        emoji = trade_emoji(execution_reason, action, is_exit)
+        emoji = trade_emoji(execution_reason, action, bool(result.get("is_exit_trade")))
         before_line = f"{before.get('side','—')} {before.get('contracts',0)}"
         after_line = f"{after.get('side','—')} {after.get('contracts',0)}"
-        ladder = derived_sizing_ladder(MAX_CONVICTION_CONTRACTS)
-        ladder_line = f"{ladder.get('probe')} → {ladder.get('partial')} → {ladder.get('strong')} → {ladder.get('full')}"
         parts = [
-            f"{emoji} LARRY {action}",
-            "",
-            f"Intent: {trade_intent}",
-            f"Execution reason: {execution_reason}",
-            f"Signal reason: {signal_reason}",
-            f"Order: {action} {qty} BTC perp contracts",
+            f"{emoji} LARRY TRADE",
+            f"{before_line} → {after_line} | {action} {qty}",
             f"Fill: {fmt_usd(fill_price)}" + (" actual" if fills.get("found") else " estimate"),
-            "",
-            f"Position: {before_line} → {after_line}",
-            f"Avg entry now: {fmt_usd(after.get('avg_entry_price')) if safe_int(after.get('contracts'),0) else 'Flat'}",
-            f"Open UPL now: {fmt_signed_usd(after.get('unrealized_pnl')) if safe_int(after.get('contracts'),0) else 'Flat'}",
-            f"Ladder: {ladder_line} (Max {MAX_CONVICTION_CONTRACTS})",
+            f"Why: {concise_decision_reason(decision)}",
         ]
-        if net is not None or gross is not None:
-            parts += [
-                "",
-                f"Gross realized: {fmt_signed_usd(gross)}" if gross is not None else "Gross realized: —",
-                f"Fees: {fmt_usd(fees)}",
-                f"Net trade P&L: {fmt_signed_usd(net)}" if net is not None else "Net trade P&L: —",
-            ]
-        if running_net is not None:
-            parts.append(f"Running Larry P&L: {fmt_signed_usd(running_net)}")
-        parts += ["", f"Time: {et_timestamp_short()}"]
+        if net is not None:
+            parts.append(f"Net realized: {fmt_signed_usd(net)}")
+        if safe_int(after.get("contracts"), 0):
+            parts.append(f"Open UPL: {fmt_signed_usd(after.get('unrealized_pnl'))}")
+        parts.append(f"Time: {et_timestamp_short()}")
         send_telegram_message("\n".join(parts), event_type=f"TRADE_{execution_reason}")
     except Exception as e:
         log.warning("Trade Telegram construction failed: %s", e)
-
 
 def maybe_send_daily_telegram_summary(gcs: 'GCS', state: Dict[str, Any], live_pos: Dict[str, Any]) -> None:
     if not TELEGRAM_DAILY_SUMMARY_ENABLED or not SEND_TELEGRAM:
@@ -2391,6 +2522,12 @@ def send_trade_email(result: Dict[str, Any]) -> None:
         running = result.get("running_pnl_summary") or {}
         running_net = running.get("net_realized_pnl_usd")
         running_count = running.get("realized_trade_count")
+        decision = result.get("trade_decision") or {}
+        decision_signal = decision.get("signal") or {}
+        decision_macro = decision.get("macro") or {}
+        decision_funding = decision.get("funding") or {}
+        decision_risk = decision.get("risk") or {}
+        decision_defense = decision.get("adaptive_defense") or {}
 
         before_line = f"{before.get('side', '—')} {before.get('contracts', 0)} contracts"
         after_line = f"{after.get('side', '—')} {after.get('contracts', 0)} contracts"
@@ -2413,6 +2550,17 @@ Execution Reason
 
 Signal Reason
   {signal_reason}
+
+Why Larry Acted
+  Summary: {concise_decision_reason(decision)}
+  Decision ID: {decision.get('decision_id') or '—'}
+  Signal scores: LONG {decision_signal.get('long_score', '—')}/4 | SHORT {decision_signal.get('short_score', '—')}/4
+  RSI / Stoch RSI: {fmt_num(decision_signal.get('rsi'), 2)} / {fmt_num(decision_signal.get('stoch_rsi'), 3)}
+  Macro: {decision_macro.get('state') or '—'} | Gate open: {decision_macro.get('gate_open')}
+  Funding rate: {fmt_num(decision_funding.get('rate'), 6)}
+  Adaptive Defense: score {decision_defense.get('score', '—')}/100 | reduce {decision_defense.get('reduce_threshold', '—')} | exit {decision_defense.get('exit_threshold', '—')}
+  Defense evidence: {', '.join(decision_defense.get('evidence') or []) or 'None'}
+  ATR stop / TSL stop: {fmt_usd(decision_risk.get('atr_stop'))} / {fmt_usd(decision_risk.get('tsl_stop'))}
 
 Order
   Action: {action} {int(qty)} contracts
@@ -2543,6 +2691,10 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
     if plan["contracts_needed"] <= 0:
         return {"ok": True, "plan": plan, "before": before, "after": before, "order": None}
 
+    trade_decision = build_trade_decision(plan, reason, before)
+    _CYCLE_CONTEXT["trade_decision"] = trade_decision
+    log_trade_decision(trade_decision)
+
     mark_at_send = safe_float(before.get("current_price"), 0.0)
     _CYCLE_CONTEXT.update({
         "phase": "ORDER_SUBMITTING",
@@ -2552,6 +2704,7 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
     })
     order = place_market_order(cb, plan["action"], plan["contracts_needed"], reason)
     _CYCLE_CONTEXT["client_order_id"] = order.get("client_order_id")
+    trade_decision["order"]["client_order_id"] = order.get("client_order_id")
     if not order.get("ok"):
         _CYCLE_CONTEXT["order_status"] = "REJECTED_OR_UNCONFIRMED"
         after = before
@@ -2614,6 +2767,7 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
         "filled_contracts": safe_float(fills.get("contracts"), actual_delta) or actual_delta,
         "position_delta_contracts": actual_delta,
         "partial_fill": execution_status == "PARTIALLY_FILLED",
+        "trade_decision": trade_decision,
         **intent_meta,
     }
     ledger_header = [
@@ -2638,6 +2792,7 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
             "filled_contracts": result.get("filled_contracts"),
             "position_delta_contracts": actual_delta,
             "partial_fill": result.get("partial_fill"),
+            "trade_decision": trade_decision,
         }, default=str)
     ])
     before_signed = safe_int(before.get("signed_contracts"), 0)
@@ -4461,7 +4616,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v43_fee_control_integrity",
+        "version": "larry_perp_v44_observability_reliability",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4522,6 +4677,15 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
             "last_guard": state.get("last_portfolio_guard"),
         },
         "exchange_position": live_pos,
+        "api_health": {
+            "coinbase_status": "HEALTHY" if not _COINBASE_OUTAGE_ACTIVE else "DEGRADED",
+            "consecutive_failures": _COINBASE_CONSECUTIVE_FAILURES,
+            "outage_started_at": _COINBASE_OUTAGE_STARTED_AT,
+            "last_success_at": _COINBASE_LAST_SUCCESS_AT,
+            "last_verified_position_at": _CYCLE_CONTEXT.get("last_verified_position_at"),
+        },
+        "last_trade_decision": state.get("last_trade_decision"),
+        "runtime_metrics": state.get("runtime_metrics"),
         "last_execution_result": last_result,
         "last_completed_trade": state.get("last_completed_trade"),
         "last_reported_trade_pnl_summary": state.get("last_reported_trade_pnl_summary"),
@@ -4540,16 +4704,26 @@ _CYCLE_CONTEXT: Dict[str, Any] = {
     "order_attempted": False,
     "client_order_id": None,
     "order_status": "NONE",
+    "coinbase_reads": [],
+    "decision_context": {},
+    "trade_decision": None,
+    "bot_managed_position_active": False,
+    "last_verified_position_at": None,
 }
 
 
 def run_once(cb: Any, gcs: GCS) -> None:
+    global _COINBASE_LAST_VERIFIED_POSITION_AT
     gcs.begin_cycle_budget()
     _CYCLE_CONTEXT.update({
         "phase": "LOADING_STATE",
         "order_attempted": False,
         "client_order_id": None,
         "order_status": "NONE",
+        "coinbase_reads": [],
+        "decision_context": {},
+        "trade_decision": None,
+        "cycle_started_monotonic": time.monotonic(),
     })
     state = load_engine_state(gcs)
     if not state:
@@ -4572,6 +4746,8 @@ def run_once(cb: Any, gcs: GCS) -> None:
 
     _CYCLE_CONTEXT["phase"] = "READING_EXCHANGE_POSITION"
     live_pos = get_live_net_position(cb)
+    _COINBASE_LAST_VERIFIED_POSITION_AT = iso_utc()
+    _CYCLE_CONTEXT["last_verified_position_at"] = _COINBASE_LAST_VERIFIED_POSITION_AT
     _CYCLE_CONTEXT["phase"] = "EVALUATING_RISK"
     recover_bot_managed_position_from_ledger(gcs, state, live_pos)
     # v29: dashboard emergency flatten requests are executed by the VM bot, not Cloud Run.
@@ -4631,6 +4807,18 @@ def run_once(cb: Any, gcs: GCS) -> None:
     update_stop_blown_shadow(state, sig.price, sig.atr or 0.0)
     mgmt = live_position_management_status(state, live_pos)
     state["manual_position_status"] = mgmt
+    _CYCLE_CONTEXT["bot_managed_position_active"] = bool(mgmt.get("bot_managed") and safe_int(live_pos.get("signed_contracts"), 0))
+    _CYCLE_CONTEXT["last_verified_position_at"] = iso_utc()
+    _CYCLE_CONTEXT["decision_context"] = {
+        "price": sig.price, "long_score": sig.long_score, "short_score": sig.short_score,
+        "rsi": sig.rsi, "stoch_rsi": sig.stoch_rsi, "volume_ratio": sig.volume_ratio,
+        "macro": macro,
+        "funding": {"rate": _funding_for_diag, "long_ok": _entry_diag.get("funding_long_ok"), "short_ok": _entry_diag.get("funding_short_ok")},
+        "atr_at_entry": controls.get("atr_at_entry"), "atr_stop": controls.get("atr_stop"),
+        "tsl_active": controls.get("tsl_active"), "tsl_stop": controls.get("tsl_stop"),
+        "tp1_trigger_price": controls.get("tp1_trigger_price"),
+        "adaptive_defense": controls.get("adaptive_defense") or {},
+    }
     exit_target, exit_reason = (None, None)
     if mgmt.get("allow_bot_to_trade_position"):
         exit_target, exit_reason = risk_exit_target_if_needed(live_pos, controls, sig.price)
@@ -4931,6 +5119,8 @@ def run_once(cb: Any, gcs: GCS) -> None:
 
     # Reconcile after potential action.
     live_pos_after = get_live_net_position(cb)
+    _COINBASE_LAST_VERIFIED_POSITION_AT = iso_utc()
+    _CYCLE_CONTEXT["last_verified_position_at"] = _COINBASE_LAST_VERIFIED_POSITION_AT
     if safe_int(live_pos_after.get("signed_contracts"), 0) == 0:
         state["position_controls"] = default_engine_state()["position_controls"]
         state["bot_managed_position"] = None
@@ -4964,6 +5154,16 @@ def run_once(cb: Any, gcs: GCS) -> None:
     maybe_send_daily_telegram_summary(gcs, state, live_pos_after)
 
     _CYCLE_CONTEXT["phase"] = "SAVING_ENGINE_STATE"
+    state["runtime_metrics"] = {
+        "cycle_elapsed_seconds_before_state_write": round(time.monotonic() - safe_float(_CYCLE_CONTEXT.get("cycle_started_monotonic"), time.monotonic()), 3),
+        "target_cycle_seconds": LOOP_SECONDS,
+        "coinbase_reads": list(_CYCLE_CONTEXT.get("coinbase_reads") or []),
+        "coinbase_read_count": len(_CYCLE_CONTEXT.get("coinbase_reads") or []),
+        "last_verified_position_at": _CYCLE_CONTEXT.get("last_verified_position_at"),
+        "updated_at": iso_utc(),
+    }
+    if last_result and last_result.get("trade_decision"):
+        state["last_trade_decision"] = last_result.get("trade_decision")
     dashboard_state = build_dashboard_engine_state(state, sig, live_pos_after, product, last_result)
     save_engine_state(gcs, dashboard_state)
     _CYCLE_CONTEXT["phase"] = "SAVING_POSITION_STATE"
@@ -4987,67 +5187,112 @@ def run_once(cb: Any, gcs: GCS) -> None:
     _CYCLE_CONTEXT["phase"] = "COMPLETE"
 
 
+def startup_live_position(cb: Any) -> Dict[str, Any]:
+    """Keep the service alive when Coinbase is unavailable during startup."""
+    try:
+        return get_live_net_position(cb)
+    except Exception as exc:
+        log.exception("Startup exchange reconciliation failed; entering the main loop fail-closed: %s", exc)
+        return {
+            "side": "UNKNOWN", "contracts": None, "signed_contracts": None,
+            "avg_entry_price": None, "current_price": None,
+            "position_verified": False, "verification_error": str(exc)[:300],
+        }
+
+
 def main() -> None:
     global _COINBASE_OUTAGE_ACTIVE, _COINBASE_OUTAGE_STARTED_AT
     global _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
+    global _COINBASE_CONSECUTIVE_FAILURES, _COINBASE_LAST_SUCCESS_AT
     log.info("Loading Coinbase client and GCS...")
     cb = build_coinbase_client()
     gcs = GCS(BUCKET_NAME)
 
     # Startup verification: live exchange state is source of truth.
-    live = get_live_net_position(cb)
+    live = startup_live_position(cb)
     log.info("Startup exchange reconciliation: %s", live)
     try:
         write_heartbeat(gcs, live.get("current_price") or 0.0, "STARTUP", live)
     except Exception as e:
         # Telemetry storage latency must never terminate the trading process.
         log.warning("Non-fatal startup heartbeat write failure: %s", e)
-    send_telegram_message(f"🟢 Larry Perp started\nPosition: {live.get('side')} {live.get('contracts')}\nTime: {et_timestamp_short()}", event_type="BOT_STARTED")
+    startup_verified = live.get("position_verified") is not False
+    send_telegram_message(
+        f"{'🟢' if startup_verified else '🟠'} Larry Perp started\n"
+        f"Position: {live.get('side')} {live.get('contracts')}\n"
+        f"{'Exchange position verified.' if startup_verified else 'Exchange position UNVERIFIED; Larry is fail-closed until a read succeeds.'}\n"
+        f"Time: {et_timestamp_short()}",
+        event_type="BOT_STARTED",
+    )
 
     while True:
         cycle_started = time.monotonic()
         try:
             run_once(cb, gcs)
+            _COINBASE_LAST_SUCCESS_AT = iso_utc()
+            prior_failures = _COINBASE_CONSECUTIVE_FAILURES
+            _COINBASE_CONSECUTIVE_FAILURES = 0
             if _COINBASE_OUTAGE_ACTIVE:
-                send_telegram_message(
-                    f"🟢 LARRY EXCHANGE CONNECTION RECOVERED\n"
-                    f"Coinbase reads completed successfully.\n"
-                    f"Outage began: {_COINBASE_OUTAGE_STARTED_AT or 'unknown'}\n"
-                    f"Time: {et_timestamp_short()}",
-                    event_type="COINBASE_RECOVERED",
-                )
+                if prior_failures >= COINBASE_ALERT_AFTER_FAILURES:
+                    send_telegram_message(
+                        f"🟢 LARRY EXCHANGE CONNECTION RECOVERED\n"
+                        f"Coinbase reads completed successfully.\n"
+                        f"Outage began: {_COINBASE_OUTAGE_STARTED_AT or 'unknown'}\n"
+                        f"Time: {et_timestamp_short()}",
+                        event_type="COINBASE_RECOVERED",
+                    )
                 _COINBASE_OUTAGE_ACTIVE = False
                 _COINBASE_OUTAGE_STARTED_AT = None
                 _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
         except Exception as e:
             log.exception("Main loop error: %s", e)
             transient_coinbase = is_transient_coinbase_error(e)
+            refresh_client = should_rebuild_coinbase_client(e)
+            exchange_read_failure = transient_coinbase or refresh_client
             should_alert = True
-            if transient_coinbase:
+            if exchange_read_failure:
+                _COINBASE_CONSECUTIVE_FAILURES += 1
                 now_monotonic = time.monotonic()
                 if not _COINBASE_OUTAGE_ACTIVE:
                     _COINBASE_OUTAGE_ACTIVE = True
                     _COINBASE_OUTAGE_STARTED_AT = et_timestamp_short()
-                elif (
+                # Rebuild the client after auth/portfolio errors. This changes no order logic;
+                # the failed cycle remains no-trade and the next cycle starts fresh.
+                if refresh_client:
+                    try:
+                        cb = build_coinbase_client()
+                        log.warning("Rebuilt Coinbase client after status=%s", coinbase_error_status(e))
+                    except Exception as rebuild_exc:
+                        log.warning("Coinbase client rebuild failed: %s", rebuild_exc)
+                should_alert = _COINBASE_CONSECUTIVE_FAILURES >= COINBASE_ALERT_AFTER_FAILURES
+                if should_alert and (
                     _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
-                    and now_monotonic - _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
-                    < COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS
+                    and now_monotonic - _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC < COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS
                 ):
                     should_alert = False
                 if should_alert:
                     _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = now_monotonic
+                elif _COINBASE_CONSECUTIVE_FAILURES < COINBASE_ALERT_AFTER_FAILURES:
+                    log.warning(
+                        "Coinbase failure %s/%s logged without Telegram; next cycle will retry",
+                        _COINBASE_CONSECUTIVE_FAILURES, COINBASE_ALERT_AFTER_FAILURES,
+                    )
                 else:
                     log.warning("Suppressing duplicate Coinbase outage Telegram alert during cooldown")
             if TELEGRAM_INCLUDE_ERRORS and should_alert:
                 attempted = bool(_CYCLE_CONTEXT.get("order_attempted"))
+                managed = bool(_CYCLE_CONTEXT.get("bot_managed_position_active"))
                 action = (
                     "Order activity occurred; verify client order ID and Coinbase position before any retry."
                     if attempted
-                    else "No order was attempted before this failure; retrying next loop."
+                    else "No order was attempted. Larry will rebuild the client and retry next cycle."
                 )
+                severity = "CRITICAL POSITION READ" if managed else "EXCHANGE READ DEGRADED"
                 send_telegram_message(
-                    f"🚨 LARRY ERROR\n{type(e).__name__}: {str(e)[:800]}\n"
+                    f"🚨 LARRY {severity}\n{type(e).__name__}: {str(e)[:500]}\n"
                     f"Phase: {_CYCLE_CONTEXT.get('phase')}\n"
+                    f"Consecutive failures: {_COINBASE_CONSECUTIVE_FAILURES}\n"
+                    f"Bot-managed position active: {'YES' if managed else 'NO'}\n"
                     f"Order attempted: {'YES' if attempted else 'NO'}\n"
                     f"Order status: {_CYCLE_CONTEXT.get('order_status')}\n"
                     f"Client order ID: {_CYCLE_CONTEXT.get('client_order_id') or 'none'}\n"
@@ -5058,7 +5303,17 @@ def main() -> None:
                 # Write a DOWN/ERROR-ish heartbeat while service is still alive.
                 gcs = GCS(BUCKET_NAME)
                 gcs.begin_cycle_budget(10.0)
-                err_payload = {"ts": iso_utc(), "status": "ERROR", "state": "ERROR", "error": str(e), "bot": "Larry Perp v12 Unified"}
+                err_payload = {
+                    "ts": iso_utc(), "status": "ERROR", "state": "ERROR",
+                    "error": str(e), "bot": "Larry Perp v44",
+                    "api_health": {
+                        "coinbase_status": "DEGRADED" if exchange_read_failure else "ERROR",
+                        "consecutive_failures": _COINBASE_CONSECUTIVE_FAILURES,
+                        "outage_started_at": _COINBASE_OUTAGE_STARTED_AT,
+                        "last_success_at": _COINBASE_LAST_SUCCESS_AT,
+                        "last_verified_position_at": _COINBASE_LAST_VERIFIED_POSITION_AT,
+                    },
+                }
                 gcs.write_json(UNIFIED_HEARTBEAT_BLOB, err_payload)
                 gcs.write_json(LEGACY_HEARTBEAT_BLOB, err_payload)
             except Exception:
