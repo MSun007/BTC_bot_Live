@@ -409,6 +409,29 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
+The v44 release adds structured trade-decision observability and bounded,
+fail-closed Coinbase read resilience without changing Larry's strategy
+thresholds, sizing, stops, profit targets or ownership rules. The dashboard now
+distinguishes a verified flat position from an unavailable Coinbase position
+read and displays `POSITION UNVERIFIED` instead of silently inferring flat.
+
+Production deployment (August 7, 2026):
+
+- Release commit: `117a39afb0fe75cd8488e3a4b0bad00b620470e8`
+- Cloud Run revision: `perp-bot-dashboard-00152-cmd` serving 100% traffic in `us-east1`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v44_observability_reliability`
+- Exchange position immediately before deployment, at startup and after the first cycle: `FLAT 0`
+- Coinbase API health after the first cycle: `HEALTHY`, five successful read calls, zero consecutive failures
+- First completed cycle: healthy at `2026-08-07T10:58:23Z`; no error and no order attempted
+- VM/GitHub engine SHA-256: `34fad927567efa8ec94951cc5e9516734ec3d2cba90c899203edced9e2c6d228`
+- Regression suite: 32 tests passed locally
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v44_20260807_0656`
+- Local backup: `LIVE PLATFORM/backup_pre_v44_observability_reliability_20260807_064808`
+- Operational note: the first full cycle took 113 seconds versus the 60-second target; the prior v43 process was also overrunning (96 seconds immediately before restart). This is being monitored as an existing runtime-latency condition, not treated as a successful timing target.
+
+### Prior v43 release
+
 The v43 release is a conservative fee-control trial based on the 229-order
 ledger review. The audit correctly identified that entry and add fees were
 missing from the displayed realized-net total, but entry-reason rows do not

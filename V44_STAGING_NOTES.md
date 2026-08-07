@@ -1,6 +1,6 @@
 # Larry v44 staging notes
 
-Status: reviewed, validated and approved for production deployment on August 7, 2026. The final deployment identifiers and verification results are recorded after rollout.
+Status: deployed and verified in production on August 7, 2026.
 
 ## Scope
 
@@ -54,3 +54,17 @@ Before deployment, verify Coinbase reports the futures book flat. Then:
 4. Deploy the dashboard to Cloud Run from the pushed commit.
 5. Back up and update the VM engine, restart `larry-perp.service`, and verify its loaded file/hash.
 6. Confirm exchange position, engine version, heartbeat, API-health state, Cloud Run revision and logs.
+
+## Production result
+
+- Release commit: `117a39afb0fe75cd8488e3a4b0bad00b620470e8`
+- Cloud Run: `perp-bot-dashboard-00152-cmd`, 100% traffic, `us-east1`
+- VM: `btc-perp-bot`, `larry-perp.service` active/running, PID `1486243`
+- VM/GitHub engine SHA-256: `34fad927567efa8ec94951cc5e9516734ec3d2cba90c899203edced9e2c6d228`
+- Published engine state: `larry_perp_v44_observability_reliability`
+- Startup and first completed cycle position: `FLAT 0`
+- API health: `HEALTHY`; zero consecutive failures
+- Local backup: `LIVE PLATFORM/backup_pre_v44_observability_reliability_20260807_064808`
+- VM backup: `/home/msunderji/larry_perp_v1.py.backup_pre_v44_20260807_0656`
+- First completed cycle: `2026-08-07T10:58:23Z`, no error and no order attempted
+- Runtime observation: first v44 cycle took 113 seconds; v43 had already logged a 96-second cycle overrun immediately before deployment.
