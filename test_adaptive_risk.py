@@ -455,6 +455,69 @@ class AdaptiveRiskTests(unittest.TestCase):
             larry.get_live_net_position = original_get_position
             larry.build_trade_decision = original_build_decision
 
+    def test_trade_decision_contains_promised_entry_context(self):
+        original_context = dict(larry._CYCLE_CONTEXT)
+        try:
+            larry._CYCLE_CONTEXT["decision_context"] = {
+                "direction": "SHORT", "active_score": 3, "signal_threshold": 3,
+                "setup_id": "setup-test", "long_score": 0, "short_score": 3,
+                "macro": {"regime": "BULL", "gate_open": True},
+                "funding": {"rate": 0.0001, "bucket": "OK"},
+                "sizing_decision": {"confidence_pct": 58, "reason": "probe", "final_contracts": 4},
+                "atr_stop": 65170, "tsl_active": False, "tsl_stop": None,
+                "adaptive_defense": {"score": 0, "entry_age_seconds": 0},
+            }
+            plan = larry.safe_target_order_plan(0, -4)
+            decision = larry.build_trade_decision(
+                plan, "CORE_IAF_SHORT_PHANTOM_CONFIRMED",
+                {"side": "FLAT", "contracts": 0, "signed_contracts": 0},
+            )
+            self.assertEqual(decision["trade_intent"], "NEW_ENTRY")
+            self.assertEqual(decision["execution_reason"], "NEW_SHORT_ENTRY")
+            self.assertEqual(decision["signal_reason"], "CORE_IAF_SHORT_PHANTOM_CONFIRMED")
+            self.assertTrue(decision["order"]["required"])
+            self.assertEqual(decision["confidence"]["confidence_pct"], 58)
+            self.assertEqual(decision["confidence"]["score"], 3)
+            self.assertEqual(decision["confidence"]["threshold"], 3)
+            self.assertEqual(decision["expected_post_position"], "SHORT 4")
+        finally:
+            larry._CYCLE_CONTEXT.clear()
+            larry._CYCLE_CONTEXT.update(original_context)
+
+    def test_entry_telegram_contains_reason_order_position_and_remaining(self):
+        original_send = larry.send_telegram_message
+        original_timestamp = larry.et_timestamp_short
+        sent = []
+        try:
+            larry.send_telegram_message = lambda message, event_type=None: sent.append((message, event_type)) or True
+            larry.et_timestamp_short = lambda: "test time ET"
+            larry.send_trade_telegram({
+                "ok": True,
+                "trade_intent": "NEW_ENTRY",
+                "execution_reason": "NEW_SHORT_ENTRY",
+                "signal_reason": "CORE_IAF_SHORT_PHANTOM_CONFIRMED",
+                "plan": {"action": "SELL", "contracts_needed": 4},
+                "order": {"client_order_id": "test"},
+                "before": {"side": "FLAT", "contracts": 0, "signed_contracts": 0, "current_price": 64865},
+                "after": {"side": "SHORT", "contracts": 4, "signed_contracts": -4, "unrealized_pnl": 0},
+                "fills": {"found": True, "avg_price": 64865},
+                "net_realized_pnl_usd": None,
+                "is_exit_trade": False,
+                "trade_decision": {
+                    "trade_intent": "NEW_ENTRY", "signal_reason": "CORE_IAF_SHORT_PHANTOM_CONFIRMED",
+                    "confidence": {"direction": "SHORT", "score": 3, "threshold": 3, "confidence_pct": 58},
+                },
+            })
+            message = sent[0][0]
+            self.assertIn("LARRY NEW ENTRY", message)
+            self.assertIn("Reason: SHORT score 3/4 ≥ 3/4 · confidence 58%", message)
+            self.assertIn("Order: SELL 4", message)
+            self.assertIn("Position: FLAT 0 → SHORT 4", message)
+            self.assertIn("Remaining: SHORT 4", message)
+        finally:
+            larry.send_telegram_message = original_send
+            larry.et_timestamp_short = original_timestamp
+
 
 if __name__ == "__main__":
     unittest.main()

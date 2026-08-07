@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v44_observability_reliability
+larry_perp_v44_1_decision_contract
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -226,6 +226,20 @@ Coinbase read handling is bounded and fail-closed:
 The dashboard exposes live position-read health. Only a successful Coinbase futures-position response may produce `POSITION FLAT`. A failed response produces `POSITION UNVERIFIED`, an operator warning and an unavailable-position row instead of silently converting the error to an empty/flat position.
 
 GCS missing-object handling is limited to `gcloud storage cat` reads of new state/log partitions. Failed write/copy commands are never suppressed as missing-file conditions.
+
+### v44.1 decision-contract hotfix
+
+v44.1 completes the notification contract that v44 only partially implemented.
+Every actual order now creates one canonical decision record containing trade
+intent, execution and signal reasons, current/target positions, explicit order
+requirement, confidence and threshold, long/short scores, Adaptive Defence,
+macro/funding, ATR/TSL, position age/grace and expected post-trade position.
+
+The searchable journal line exposes the same fields. Email renders the full
+decision and remaining protection. Telegram remains compact but uses a typed
+heading and explicit `Reason`, `Order`, `Position`, `Fill`, `Net realized` and
+`Remaining` lines. Regression tests assert the decision schema and Telegram
+message contract. The hotfix changes reporting only; trading logic is unchanged.
 
 ## Manual positions and ownership
 

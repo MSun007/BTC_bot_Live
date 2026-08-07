@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Larry Perp v44 — Observability + Reliability Release
+Larry Perp v44.1 — Decision Contract Hotfix
 ==========================================================
 Exchange  : Coinbase Advanced Trade / FCM INTX-style BTC Perp product
 Product   : BIP-20DEC30-CDE
@@ -85,6 +85,18 @@ CHANGELOG v43 -> v44
                     conditions rather than retried storage outages.
 7. API_TELEMETRY  - Engine state exposes API health, read attempts, cycle runtime,
                     last verified position time and last trade decision.
+
+CHANGELOG v44 -> v44.1
+---------------------
+1. DECISION_SCHEMA - Every actual order records intent, execution/signal reason,
+                     order-required state, confidence, threshold and expected post-position.
+2. CONTEXT_WIRING - Core-entry sizing confidence, setup ID and funding bucket are
+                    copied into the canonical pre-order decision before execution.
+3. JOURNAL_DETAIL - Searchable TRADE_DECISION lines include the full operator contract.
+4. TELEGRAM_DETAIL- Compact alerts now show typed heading, reason, order, position,
+                    fill, net realized impact and remaining runner/protection state.
+5. EMAIL_DETAIL   - Macro regime, confidence, age/grace, expected position and
+                    remaining protection are explicitly rendered.
 
 CHANGELOG v30 -> v31
 --------------------
@@ -501,7 +513,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v44_observability_reliability")
+log = logging.getLogger("larry_perp_v44_1_decision_contract")
 
 # =============================================================================
 # UTILITIES
@@ -1414,7 +1426,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v44_observability_reliability",
+        "version": "larry_perp_v44_1_decision_contract",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -2177,16 +2189,28 @@ def classify_trade_intent(plan: Dict[str, Any], signal_reason: str) -> Dict[str,
         "sizing_rung_after": ladder_rung_for_contracts(target_abs, ladder),
     }
 
-def build_trade_decision(plan: Dict[str, Any], reason: str, before: Dict[str, Any]) -> Dict[str, Any]:
+def build_trade_decision(
+    plan: Dict[str, Any], reason: str, before: Dict[str, Any],
+    intent_meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Create one structured explanation used by logs, state, email and Telegram."""
     ctx = dict(_CYCLE_CONTEXT.get("decision_context") or {})
     defense = dict(ctx.get("adaptive_defense") or {})
     evidence = defense.get("evidence") or []
     evidence_names = [str(item.get("factor")) for item in evidence if isinstance(item, dict) and item.get("factor")]
+    sizing = dict(ctx.get("sizing_decision") or {})
+    intent_meta = dict(intent_meta or classify_trade_intent(plan, reason))
+    active_score = ctx.get("active_score")
+    if active_score is None:
+        active_score = ctx.get("short_score") if safe_int(plan.get("target_signed"), 0) < 0 else ctx.get("long_score")
     return {
         "decision_id": f"decision-{int(time.time())}-{uuid.uuid4().hex[:8]}",
         "decided_at": iso_utc(),
         "reason": reason,
+        "trade_intent": intent_meta.get("trade_intent"),
+        "execution_reason": intent_meta.get("execution_reason"),
+        "signal_reason": intent_meta.get("signal_reason") or reason,
+        "setup_id": ctx.get("setup_id"),
         "phase": _CYCLE_CONTEXT.get("phase"),
         "current_position": {
             "side": before.get("side"), "contracts": before.get("contracts"),
@@ -2198,7 +2222,17 @@ def build_trade_decision(plan: Dict[str, Any], reason: str, before: Dict[str, An
             "side": plan.get("target_side"), "contracts": plan.get("target_contracts"),
             "signed_contracts": plan.get("target_signed"),
         },
-        "order": {"action": plan.get("action"), "contracts": plan.get("contracts_needed")},
+        "order": {
+            "required": safe_int(plan.get("contracts_needed"), 0) > 0,
+            "action": plan.get("action"), "contracts": plan.get("contracts_needed"),
+        },
+        "confidence": {
+            "direction": ctx.get("direction"), "score": active_score,
+            "threshold": ctx.get("signal_threshold"),
+            "confidence_pct": sizing.get("confidence_pct"),
+            "sizing_tier": sizing.get("tier") or sizing.get("sizing_rung") or sizing.get("reason"),
+            "target_contracts": sizing.get("final_contracts") or sizing.get("target_abs_contracts"),
+        },
         "signal": {
             "price": ctx.get("price"), "long_score": ctx.get("long_score"),
             "short_score": ctx.get("short_score"), "rsi": ctx.get("rsi"),
@@ -2211,6 +2245,8 @@ def build_trade_decision(plan: Dict[str, Any], reason: str, before: Dict[str, An
             "tsl_active": ctx.get("tsl_active"), "tsl_stop": ctx.get("tsl_stop"),
             "tp1_trigger_price": ctx.get("tp1_trigger_price"),
             "position_age_seconds": defense.get("entry_age_seconds"),
+            "grace_period_seconds": ADAPTIVE_ENTRY_GRACE_MINUTES * 60,
+            "grace_period_active": defense.get("entry_grace_active"),
         },
         "adaptive_defense": {
             "enabled": defense.get("enabled"), "score": defense.get("score"),
@@ -2230,14 +2266,24 @@ def log_trade_decision(decision: Dict[str, Any]) -> None:
     order = decision.get("order") or {}
     current = decision.get("current_position") or {}
     target = decision.get("target_position") or {}
+    confidence = decision.get("confidence") or {}
+    macro = decision.get("macro") or {}
+    funding = decision.get("funding") or {}
+    risk = decision.get("risk") or {}
     log.warning(
-        "TRADE_DECISION id=%s reason=%s current=%s_%s target=%s_%s action=%s qty=%s "
+        "TRADE_DECISION id=%s intent=%s execution_reason=%s signal_reason=%s current=%s_%s target=%s_%s action=%s qty=%s "
+        "confidence=%s score=%s threshold=%s "
         "long_score=%s short_score=%s defense_score=%s reduce_threshold=%s exit_threshold=%s "
-        "evidence=%s",
-        decision.get("decision_id"), decision.get("reason"), current.get("side"), current.get("contracts"),
+        "macro=%s funding=%s atr_stop=%s tsl_active=%s tsl_stop=%s position_age=%s expected_post=%s evidence=%s",
+        decision.get("decision_id"), decision.get("trade_intent"), decision.get("execution_reason"),
+        decision.get("signal_reason"), current.get("side"), current.get("contracts"),
         target.get("side"), target.get("contracts"), order.get("action"), order.get("contracts"),
+        confidence.get("confidence_pct"), confidence.get("score"), confidence.get("threshold"),
         signal.get("long_score"), signal.get("short_score"), ad.get("score"),
-        ad.get("reduce_threshold"), ad.get("exit_threshold"), ",".join(ad.get("evidence") or []) or "none",
+        ad.get("reduce_threshold"), ad.get("exit_threshold"), macro.get("regime") or macro.get("state"),
+        funding.get("rate"), risk.get("atr_stop"), risk.get("tsl_active"), risk.get("tsl_stop"),
+        risk.get("position_age_seconds"), decision.get("expected_post_position"),
+        ",".join(ad.get("evidence") or []) or "none",
     )
 
 
@@ -2288,19 +2334,46 @@ def send_trade_telegram(result: Dict[str, Any]) -> None:
         execution_reason = result.get("execution_reason") or result.get("reason") or "TRADE"
         fill_price = safe_float(fills.get("avg_price"), 0.0) or safe_float(before.get("current_price"), 0.0)
         net = result.get("net_realized_pnl_usd")
+        intent = str(result.get("trade_intent") or decision.get("trade_intent") or "TRADE")
+        signal_reason = str(result.get("signal_reason") or decision.get("signal_reason") or execution_reason)
+        confidence = decision.get("confidence") or {}
         emoji = trade_emoji(execution_reason, action, bool(result.get("is_exit_trade")))
+        if str(execution_reason).startswith("ADAPTIVE_DEFENSE"):
+            heading = "LARRY DEFENSE EXIT" if intent == "FULL_EXIT" else "LARRY DEFENSE REDUCTION"
+        elif intent == "NEW_ENTRY":
+            heading = "LARRY NEW ENTRY"
+        elif intent == "REVERSAL_FLIP":
+            heading = "LARRY REVERSAL"
+        elif intent in ("TAKE_PROFIT_STEPDOWN", "TARGET_STEPDOWN"):
+            heading = "LARRY POSITION REDUCTION"
+        else:
+            heading = "LARRY TRADE"
         before_line = f"{before.get('side','—')} {before.get('contracts',0)}"
         after_line = f"{after.get('side','—')} {after.get('contracts',0)}"
+        if str(execution_reason).startswith("ADAPTIVE_DEFENSE"):
+            reason_line = concise_decision_reason(decision)
+        elif confidence.get("score") is not None:
+            conf_text = f" · confidence {confidence.get('confidence_pct')}%" if confidence.get("confidence_pct") is not None else ""
+            reason_line = (
+                f"{confidence.get('direction') or after.get('side')} score {confidence.get('score')}/4 "
+                f"≥ {confidence.get('threshold')}/4{conf_text} · {signal_reason}"
+            )
+        else:
+            reason_line = concise_decision_reason(decision)
         parts = [
-            f"{emoji} LARRY TRADE",
-            f"{before_line} → {after_line} | {action} {qty}",
+            f"{emoji} {heading}",
+            f"Reason: {reason_line}",
+            f"Order: {action} {qty}",
+            f"Position: {before_line} → {after_line}",
             f"Fill: {fmt_usd(fill_price)}" + (" actual" if fills.get("found") else " estimate"),
-            f"Why: {concise_decision_reason(decision)}",
         ]
         if net is not None:
             parts.append(f"Net realized: {fmt_signed_usd(net)}")
         if safe_int(after.get("contracts"), 0):
-            parts.append(f"Open UPL: {fmt_signed_usd(after.get('unrealized_pnl'))}")
+            runner = " runner" if abs(safe_int(after.get("signed_contracts"), 0)) < abs(safe_int(before.get("signed_contracts"), 0)) else ""
+            parts.append(f"Remaining: {after_line}{runner} · Open UPL {fmt_signed_usd(after.get('unrealized_pnl'))}")
+        else:
+            parts.append("Remaining: FLAT")
         parts.append(f"Time: {et_timestamp_short()}")
         send_telegram_message("\n".join(parts), event_type=f"TRADE_{execution_reason}")
     except Exception as e:
@@ -2528,6 +2601,7 @@ def send_trade_email(result: Dict[str, Any]) -> None:
         decision_funding = decision.get("funding") or {}
         decision_risk = decision.get("risk") or {}
         decision_defense = decision.get("adaptive_defense") or {}
+        decision_confidence = decision.get("confidence") or {}
 
         before_line = f"{before.get('side', '—')} {before.get('contracts', 0)} contracts"
         after_line = f"{after.get('side', '—')} {after.get('contracts', 0)} contracts"
@@ -2554,13 +2628,18 @@ Signal Reason
 Why Larry Acted
   Summary: {concise_decision_reason(decision)}
   Decision ID: {decision.get('decision_id') or '—'}
+  Setup ID: {decision.get('setup_id') or '—'}
+  Trade intent / execution / signal: {decision.get('trade_intent') or trade_intent} / {decision.get('execution_reason') or execution_reason} / {decision.get('signal_reason') or signal_reason}
+  Order required: {(decision.get('order') or {}).get('required')} | Expected post-trade: {decision.get('expected_post_position') or after_line}
+  Confidence: {decision_confidence.get('confidence_pct', '—')}% | Score {decision_confidence.get('score', '—')}/4 | Threshold {decision_confidence.get('threshold', '—')}/4 | Tier {decision_confidence.get('sizing_tier') or '—'}
   Signal scores: LONG {decision_signal.get('long_score', '—')}/4 | SHORT {decision_signal.get('short_score', '—')}/4
   RSI / Stoch RSI: {fmt_num(decision_signal.get('rsi'), 2)} / {fmt_num(decision_signal.get('stoch_rsi'), 3)}
-  Macro: {decision_macro.get('state') or '—'} | Gate open: {decision_macro.get('gate_open')}
-  Funding rate: {fmt_num(decision_funding.get('rate'), 6)}
+  Macro: {decision_macro.get('regime') or decision_macro.get('state') or '—'} | Gate open: {decision_macro.get('gate_open')}
+  Funding: rate {fmt_num(decision_funding.get('rate'), 6)} | Bucket {decision_funding.get('bucket') or '—'}
   Adaptive Defense: score {decision_defense.get('score', '—')}/100 | reduce {decision_defense.get('reduce_threshold', '—')} | exit {decision_defense.get('exit_threshold', '—')}
   Defense evidence: {', '.join(decision_defense.get('evidence') or []) or 'None'}
   ATR stop / TSL stop: {fmt_usd(decision_risk.get('atr_stop'))} / {fmt_usd(decision_risk.get('tsl_stop'))}
+  TSL active: {decision_risk.get('tsl_active')} | Position age: {fmt_num(decision_risk.get('position_age_seconds'), 0)}s | Grace: {fmt_num(decision_risk.get('grace_period_seconds'), 0)}s (active={decision_risk.get('grace_period_active')})
 
 Order
   Action: {action} {int(qty)} contracts
@@ -2578,6 +2657,7 @@ Execution Economics
   Net realized trade impact: {fmt_usd(net_realized) if net_realized is not None else 'N/A — no contracts closed'}
   Open/unrealized after trade: {fmt_usd(after.get('unrealized_pnl')) if after.get('contracts') else 'Flat'}
   Remaining position after trade: {after_line}
+  Remaining protection: ATR {fmt_usd(decision_risk.get('atr_stop'))} | TSL active {decision_risk.get('tsl_active')} | TSL {fmt_usd(decision_risk.get('tsl_stop'))}
 
 Running Larry P&L
   Running net realized P&L: {fmt_usd(running_net) if running_net is not None else 'Pending ledger summary'}
@@ -2691,7 +2771,8 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
     if plan["contracts_needed"] <= 0:
         return {"ok": True, "plan": plan, "before": before, "after": before, "order": None}
 
-    trade_decision = build_trade_decision(plan, reason, before)
+    intent_meta = classify_trade_intent(plan, reason)
+    trade_decision = build_trade_decision(plan, reason, before, intent_meta)
     _CYCLE_CONTEXT["trade_decision"] = trade_decision
     log_trade_decision(trade_decision)
 
@@ -2755,7 +2836,6 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
     gross_realized = estimated_gross_realized(before, plan, fill_price)
     fees = safe_float(fills.get("commission"), 0.0)
     net_realized = (gross_realized - fees) if gross_realized is not None else None
-    intent_meta = classify_trade_intent(plan, reason)
     result = {
         "ok": bool(order.get("ok")) and actual_delta > 0, "plan": plan, "before": before, "after": after,
         "order": order, "fills": fills, "reason": reason, "mark_at_send": mark_at_send,
@@ -2795,6 +2875,10 @@ def execute_target(cb: Any, gcs: GCS, target_signed: int, reason: str, signal_cl
             "trade_decision": trade_decision,
         }, default=str)
     ])
+    try:
+        result["running_pnl_summary"] = ledger_running_totals(gcs)
+    except Exception as exc:
+        log.warning("Running P&L summary unavailable after trade (non-fatal): %s", exc)
     before_signed = safe_int(before.get("signed_contracts"), 0)
     after_signed = safe_int(after.get("signed_contracts"), 0)
     confirmed_change = after_signed != before_signed
@@ -4616,7 +4700,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v44_observability_reliability",
+        "version": "larry_perp_v44_1_decision_contract",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -5072,6 +5156,20 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         _setup_id = (state.get("phantom") or {}).get("setup_id")
                         if ok:
                             core_reason = f"REVERSAL_PROBE_{confirmed}_PHANTOM_CONFIRMED" if _locked_class == "REVERSAL_PROBE" else f"CORE_IAF_{confirmed}_PHANTOM_CONFIRMED"
+                            _CYCLE_CONTEXT.setdefault("decision_context", {}).update({
+                                "direction": confirmed,
+                                "active_score": _score,
+                                "signal_threshold": SIGNAL_COMMIT_SCORE,
+                                "sizing_decision": dict(sizing_decision),
+                                "setup_id": _setup_id,
+                                "signal_class": core_reason,
+                                "funding": {
+                                    "rate": _funding,
+                                    "bucket": sizing_decision.get("funding_bucket"),
+                                    "long_ok": _entry_diag.get("funding_long_ok"),
+                                    "short_ok": _entry_diag.get("funding_short_ok"),
+                                },
+                            })
                             last_result = execute_target(cb, gcs, target, core_reason, signal_class=core_reason)
                             append_decision_event(gcs, {
                                 "event": "EXECUTED" if last_result.get("ok") else "EXECUTION_FAILED",

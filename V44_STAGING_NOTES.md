@@ -68,3 +68,14 @@ Before deployment, verify Coinbase reports the futures book flat. Then:
 - VM backup: `/home/msunderji/larry_perp_v1.py.backup_pre_v44_20260807_0656`
 - First completed cycle: `2026-08-07T10:58:23Z`, no error and no order attempted
 - Runtime observation: first v44 cycle took 113 seconds; v43 had already logged a 96-second cycle overrun immediately before deployment.
+
+## v44.1 decision-contract hotfix
+
+After the first v44 entry, the operator confirmed that the promised decision
+details were not present in Telegram. Review found that v44 stored only a
+partial schema: core sizing confidence was not wired into the canonical
+decision, Telegram used a generic trade template, macro used the wrong display
+field, and the running ledger summary was never populated before email.
+
+v44.1 corrects those reporting defects without changing strategy behavior and
+adds regression tests for the canonical decision fields and Telegram contract.
