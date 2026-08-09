@@ -16,6 +16,36 @@ def candle(start, o, h, lo, c, volume=100):
 
 
 class AdaptiveRiskTests(unittest.TestCase):
+    def test_config_integrity_requires_exact_version_and_hash(self):
+        good = larry.strategy_config_integrity({
+            "CONFIG_VERSION": larry.EXPECTED_CONFIG_VERSION,
+            "CONFIG_CANONICAL_SHA256": larry.EXPECTED_CONFIG_SHA256,
+        })
+        self.assertTrue(good["entries_allowed"])
+        bad = larry.strategy_config_integrity({
+            "CONFIG_VERSION": larry.EXPECTED_CONFIG_VERSION,
+            "CONFIG_CANONICAL_SHA256": "wrong",
+        })
+        self.assertFalse(bad["entries_allowed"])
+
+    def test_core_score_two_can_arm_but_cannot_commit(self):
+        state = larry.default_engine_state()
+        state["macro_regime"] = {"state": "NEUTRAL", "gate_open": True}
+        state["phantom"].update({
+            "state": "PHANTOM_ARMED", "direction": "SHORT",
+            "signal_class": "CORE", "is_reversal_probe": False,
+            "extension_price": 101, "armed_candle_start": 1,
+            "expires_at": (larry.now_utc() + larry.timedelta(minutes=20)).isoformat(),
+            "locked_target_contracts": 4,
+        })
+        bars = [candle(1, 100, 101, 99, 100), candle(2, 100, 101, 99, 100), candle(3, 100, 101, 99, 100)]
+        score_two = larry.SignalSnapshot(100, 50, .5, 96, 100, 104, 2, 1.0, 0, 2, {}, {})
+        self.assertIsNone(larry.update_phantom_state(state, score_two, 0.0, bars))
+        self.assertEqual(state["phantom"]["state"], "PHANTOM_ARMED")
+        score_three = larry.SignalSnapshot(100, 50, .5, 96, 100, 104, 2, 1.0, 0, 3, {}, {})
+        self.assertEqual(larry.update_phantom_state(state, score_three, 0.0, bars), "SHORT")
+        self.assertEqual(state["phantom"]["state"], "COMMITTED_ENTRY")
+
     def test_confirmed_pivots_do_not_use_newest_bar(self):
         bars = [
             candle(1, 100, 102, 99, 101), candle(2, 101, 105, 100, 104),
@@ -74,6 +104,22 @@ class AdaptiveRiskTests(unittest.TestCase):
             {"confidence_pct": 58},
         )
         self.assertEqual(state["add_on_state"]["adds_count"], 0)
+        self.assertEqual(state["add_on_state"]["last_add_confidence_pct"], 58)
+        self.assertEqual(state["add_on_state"]["last_target_contracts"], 4)
+
+    def test_same_confidence_cannot_add_after_fresh_entry(self):
+        state = larry.default_engine_state()
+        larry.record_progressive_add(
+            state,
+            {"ok": True, "before": {"signed_contracts": 0},
+             "after": {"signed_contracts": 4, "side": "SHORT", "avg_entry_price": 100}},
+            {"confidence_pct": 58},
+        )
+        allowed, reason = larry.should_allow_progressive_add(
+            state, -4, -8, {"confidence_pct": 58}
+        )
+        self.assertFalse(allowed)
+        self.assertIn("confidence_improvement", reason)
 
     def test_same_side_increase_counts_as_one_add(self):
         state = larry.default_engine_state()
@@ -175,18 +221,86 @@ class AdaptiveRiskTests(unittest.TestCase):
         self.assertEqual(first["state"], "CONFIRMING")
         self.assertGreaterEqual(first["adverse_atr"], 0.50)
         controls["adaptive_defense"] = first
+        repeated = larry.adaptive_defense_snapshot(
+            state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars,
+            {"last_swing_high": {"price": 104}},
+        )
+        self.assertEqual(repeated["state"], "CONFIRMING")
+        self.assertEqual(repeated["confirm_cycles"], 1)
+        bars[-2]["start"] = 7
         second = larry.adaptive_defense_snapshot(
             state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars,
             {"last_swing_high": {"price": 104}},
         )
         self.assertEqual(second["state"], "CONFIRMING")
         controls["adaptive_defense"] = second
+        bars[-2]["start"] = 8
         third = larry.adaptive_defense_snapshot(
             state, {"signed_contracts": -4, "avg_entry_price": 100}, sig, bars,
             {"last_swing_high": {"price": 104}},
         )
         self.assertEqual(third["state"], "EXIT")
         self.assertEqual(third["confirm_cycles"], 3)
+
+    def test_core_sizing_cannot_reduce_same_side_position(self):
+        self.assertEqual(larry.enforce_core_monotonic_target(-8, -4)[0], -8)
+        self.assertEqual(larry.enforce_core_monotonic_target(8, 4)[0], 8)
+        self.assertEqual(larry.enforce_core_monotonic_target(-4, -8)[0], -8)
+        self.assertEqual(larry.enforce_core_monotonic_target(-4, 4)[0], 4)
+
+    def test_macro_direction_gate_blocks_countertrend_entries(self):
+        prior = larry.COUNTERTREND_ENTRIES_ENABLED
+        try:
+            larry.COUNTERTREND_ENTRIES_ENABLED = False
+            self.assertFalse(larry.macro_allows_core_direction("SHORT", {"state": "BULLISH"})[0])
+            self.assertFalse(larry.macro_allows_core_direction("LONG", {"state": "BEARISH"})[0])
+            self.assertTrue(larry.macro_allows_core_direction("LONG", {"state": "BULLISH"})[0])
+            self.assertTrue(larry.macro_allows_core_direction("SHORT", {"state": "NEUTRAL"})[0])
+        finally:
+            larry.COUNTERTREND_ENTRIES_ENABLED = prior
+
+    def test_trade_risk_accounting_is_fee_complete_and_idempotent(self):
+        state = larry.default_engine_state()
+        result = {
+            "ok": True,
+            "plan": {"action": "BUY"},
+            "order": {"order_id": "one"},
+            "fees_usd": 1.60,
+            "gross_realized_pnl_usd": -0.45,
+            "is_exit_trade": True,
+        }
+        larry.record_trade_risk_result(state, result, "ADAPTIVE_DEFENSE_REDUCE_SHORT")
+        larry.record_trade_risk_result(state, result, "ADAPTIVE_DEFENSE_REDUCE_SHORT")
+        self.assertAlmostEqual(state["risk"]["daily_net_pnl_usd"], -2.05)
+        self.assertEqual(state["risk"]["daily_stop_hits"], 1)
+        self.assertEqual(state["risk"]["loss_streak"], 1)
+
+        entry = {
+            "ok": True,
+            "plan": {"action": "SELL"},
+            "order": {"order_id": "two"},
+            "fees_usd": 2.13,
+            "gross_realized_pnl_usd": None,
+            "is_exit_trade": False,
+        }
+        larry.record_trade_risk_result(state, entry, "NEW_SHORT_ENTRY")
+        self.assertAlmostEqual(state["risk"]["daily_net_pnl_usd"], -4.18)
+
+    def test_quantity_only_change_preserves_adaptive_episode(self):
+        controls = {
+            "position_version": 1, "position_fingerprint": "-8:100.00000000",
+            "position_signed_contracts": -8, "position_avg_entry": 100,
+            "adaptive_entry_at": "2026-08-09T10:00:00+00:00",
+            "adaptive_entry_price": 100,
+            "adaptive_entry_baseline": {"score": 25, "factors": ["x"]},
+            "adaptive_reduction_latched": True,
+        }
+        larry.update_position_version(
+            controls, {"signed_contracts": -4, "avg_entry_price": 100}, 10
+        )
+        self.assertEqual(controls["adaptive_entry_at"], "2026-08-09T10:00:00+00:00")
+        self.assertEqual(controls["adaptive_entry_baseline"]["score"], 25)
+        self.assertTrue(controls["adaptive_reduction_latched"])
 
     def test_stale_trailing_stop_cannot_exit_new_position_version(self):
         controls = {

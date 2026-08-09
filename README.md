@@ -5,7 +5,7 @@ Larry is a live Coinbase BTC perpetual-futures trading system with conviction-ba
 The current production engine is:
 
 ```text
-larry_perp_v44_1_decision_contract
+larry_perp_v45_control_integrity
 ```
 
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
@@ -46,6 +46,14 @@ MONITORING → PHANTOM_ARMED → CLOSED-CANDLE CONFIRMATION → COMMITTED ENTRY
 Position size scales with conviction. The effective ladder is derived from `MAX_CONVICTION_CONTRACTS` and the configured probe, partial and strong percentages. `MAX_CONVICTION_CONTRACTS` is the sole absolute contract limit; the portfolio leverage guard may resize a target lower when account equity cannot safely support it.
 
 Progressive additions trade toward a higher target size only when confidence improves. They are not repeated identical orders.
+
+### v45 entry-integrity controls
+
+- A core 2/4 setup may arm, but only a later distinct closed candle that still scores at least 3/4 can commit an order.
+- The initial entry's confidence and target size become the baseline for additions. An add requires the configured confidence improvement and remains subject to the one-add live limit.
+- Entry sizing may hold, add, or reverse; it cannot reduce a same-side position. Profit-taking and risk management exclusively own reductions.
+- New countertrend entries and adds are blocked: bullish macro blocks shorts, bearish macro blocks longs, and neutral conditions are capped at probe size.
+- The engine validates the live GCS configuration version and canonical SHA-256. A mismatch blocks new entries/adds while firm stops and all position protection remain active.
 
 ## Position anchoring and resizing
 
@@ -105,8 +113,8 @@ Current live actions:
 | Score/state | Response |
 |---|---|
 | Below 75 | `HOLD` |
-| 75–84 for three consecutive cycles | Reduce one conviction rung |
-| 85+ for three consecutive cycles | Exit the position |
+| 75–84 for three distinct closed candles | Reduce one conviction rung |
+| 85+ for three distinct closed candles | Exit the position |
 | Firm ATR stop crossed | Exit immediately |
 
 Ordinary adaptive defence also requires the position to be at least 20 minutes
@@ -128,6 +136,12 @@ a supposedly fresh setup every time the cooldown expires. Opposite-side setups
 remain eligible under their normal gates.
 
 Adaptive defence can only reduce or close an existing position. It cannot independently open or reverse a trade.
+
+After one adaptive reduction, a latch prevents repeated cascade reductions from the same deterioration episode. The latch clears only after recovery; an 85+ confirmed exit remains available. Quantity-only reductions preserve the original adaptive entry time and evidence baseline rather than restarting the grace period.
+
+### Fee-complete loss governor
+
+Every confirmed Larry order contributes its actual economic impact to the daily risk umbrella: realized gross P&L minus fees. Entry/add commissions therefore count immediately, and losing adaptive reductions count toward the loss streak even though their reason does not contain the word `STOP`. New entries halt at the configured daily net-loss limit; open-position exits remain active.
 
 ### R-based profit taking
 

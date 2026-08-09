@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Larry Perp v44.1 — Decision Contract Hotfix
+Larry Perp v45 — Control Integrity Hardening
 ==========================================================
 Exchange  : Coinbase Advanced Trade / FCM INTX-style BTC Perp product
 Product   : BIP-20DEC30-CDE
@@ -97,6 +97,22 @@ CHANGELOG v44 -> v44.1
                     fill, net realized impact and remaining runner/protection state.
 5. EMAIL_DETAIL   - Macro regime, confidence, age/grace, expected position and
                     remaining protection are explicitly rendered.
+
+CHANGELOG v44.1 -> v45
+----------------------
+1. COMMIT_INTEGRITY - Core score-2 setups may arm but cannot execute until a
+                      distinct closed candle still meets the 3/4 commit score.
+2. ADD_INTEGRITY    - Fresh-entry confidence becomes the add baseline; same-
+                      confidence setups cannot pyramid and core sizing cannot reduce.
+3. DEFENCE_LATCH   - Adaptive confirmations require distinct closed candles,
+                      quantity-only changes preserve the episode, and only one
+                      reduction is allowed until recovery or stronger exit evidence.
+4. PNL_RISK         - Daily protection uses actual fee-complete trade impacts;
+                      every losing reduction/exit counts, not only STOP-labelled rows.
+5. DIRECTIONAL_MACRO - Bull regimes block new shorts and bear regimes block new
+                       longs; neutral regimes are probe-capped.
+6. CONFIG_INTEGRITY - New entries fail closed when live GCS configuration version
+                      or canonical SHA-256 does not match the deployed release.
 
 CHANGELOG v30 -> v31
 --------------------
@@ -257,6 +273,12 @@ MACRO_BLOCKED_PROBE_CONTRACTS = int(os.getenv("MACRO_BLOCKED_PROBE_CONTRACTS", s
 PROGRESSIVE_ADD_ONS_ENABLED = os.getenv("PROGRESSIVE_ADD_ONS_ENABLED", "true").lower() in ("1", "true", "yes")
 MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = int(os.getenv("MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD", "10"))
 MAX_POSITION_ADDS = int(os.getenv("MAX_POSITION_ADDS", "3"))
+EXPECTED_CONFIG_VERSION = "v45_control_integrity"
+# Filled from the canonical strategy_config.json after release construction.
+EXPECTED_CONFIG_SHA256 = "d9d1c8a61512a15760032325c019a0c9228d4677ba71c6d8c9bf5177e74f2d91"
+DAILY_NET_LOSS_LIMIT_USD = float(os.getenv("DAILY_NET_LOSS_LIMIT_USD", "25"))
+COUNTERTREND_ENTRIES_ENABLED = os.getenv("COUNTERTREND_ENTRIES_ENABLED", "false").lower() in ("1", "true", "yes")
+NEUTRAL_REGIME_MAX_CONTRACTS = int(os.getenv("NEUTRAL_REGIME_MAX_CONTRACTS", str(CONTRACTS_PER_TRADE_PROBE)))
 # v15 signal commitment controls: prevent a moving-target setup from never executing.
 SIGNAL_LOCK_ENABLED = os.getenv("SIGNAL_LOCK_ENABLED", "true").lower() in ("1", "true", "yes")
 SIGNAL_VALIDITY_MINUTES = int(os.getenv("SIGNAL_VALIDITY_MINUTES", "20"))
@@ -407,8 +429,8 @@ EMERGENCY_FLATTEN_REQUEST_BLOB = "emergency_flatten_request.json"  # v29 dashboa
 
 
 DEFAULT_STRATEGY_CONFIG = {
-    "CONFIG_VERSION": "v17_telegram_alerts",
-    "CONFIG_NOTE": "v17/v25: ladder TP profit-taking plus Telegram trade/system alerts, daily summary, and dashboard-controlled alert toggles.",
+    "CONFIG_VERSION": EXPECTED_CONFIG_VERSION,
+    "CONFIG_NOTE": "v45: fail-closed config integrity, strict score commitment, monotonic entry sizing, directional macro gating, distinct-candle adaptive defence, and fee-complete risk accounting.",
     "CONTRACT_SIZE_BTC": CONTRACT_SIZE_BTC,
     "MAX_CONVICTION_CONTRACTS": MAX_CONVICTION_CONTRACTS,
     "PROBE_PCT": PROBE_PCT,
@@ -423,6 +445,9 @@ DEFAULT_STRATEGY_CONFIG = {
     "PROGRESSIVE_ADD_ONS_ENABLED": PROGRESSIVE_ADD_ONS_ENABLED,
     "MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD": MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD,
     "MAX_POSITION_ADDS": MAX_POSITION_ADDS,
+    "DAILY_NET_LOSS_LIMIT_USD": DAILY_NET_LOSS_LIMIT_USD,
+    "COUNTERTREND_ENTRIES_ENABLED": COUNTERTREND_ENTRIES_ENABLED,
+    "NEUTRAL_REGIME_MAX_CONTRACTS": NEUTRAL_REGIME_MAX_CONTRACTS,
     "SIGNAL_LOCK_ENABLED": SIGNAL_LOCK_ENABLED,
     "SIGNAL_VALIDITY_MINUTES": SIGNAL_VALIDITY_MINUTES,
     "SIGNAL_CANCEL_SCORE": SIGNAL_CANCEL_SCORE,
@@ -513,7 +538,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v44_1_decision_contract")
+log = logging.getLogger("larry_perp_v45_control_integrity")
 
 # =============================================================================
 # UTILITIES
@@ -882,6 +907,10 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
     code deployment. Missing/invalid keys fall back to safe defaults.
     """
     live = gcs.read_json(STRATEGY_CONFIG_BLOB, default={}) or {}
+    live_canonical_sha256 = (
+        hashlib.sha256(json.dumps(live, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+        if isinstance(live, dict) and live else None
+    )
     cfg = dict(DEFAULT_STRATEGY_CONFIG)
     if isinstance(live, dict):
         for k, v in live.items():
@@ -889,9 +918,11 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
                 cfg[k] = v
         cfg["CONFIG_SOURCE"] = f"gs://{BUCKET_NAME}/{STRATEGY_CONFIG_BLOB}"
         cfg["CONFIG_UPDATED_AT"] = live.get("updated_at") or live.get("last_updated")
+        cfg["CONFIG_CANONICAL_SHA256"] = live_canonical_sha256
     else:
         cfg["CONFIG_SOURCE"] = "DEFAULT_STRATEGY_CONFIG"
         cfg["CONFIG_UPDATED_AT"] = None
+        cfg["CONFIG_CANONICAL_SHA256"] = None
 
     # Normalize typed values.
     float_keys = [
@@ -902,7 +933,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "FUNDING_SHORT_MIN", "FUNDING_SIZE_REDUCE_AT",
         "PROBE_PCT", "PARTIAL_PCT", "STRONG_PCT",
         "REVERSAL_NEAR_BB_PCT", "REVERSAL_RSI_SOFT_LONG_MAX", "REVERSAL_RSI_SOFT_SHORT_MIN",
-        "MIN_FUTURES_EQUITY_BUFFER_USD", "ADAPTIVE_ENTRY_GRACE_MINUTES", "ADAPTIVE_MIN_ADVERSE_ATR",
+        "MIN_FUTURES_EQUITY_BUFFER_USD", "ADAPTIVE_ENTRY_GRACE_MINUTES", "ADAPTIVE_MIN_ADVERSE_ATR", "DAILY_NET_LOSS_LIMIT_USD",
         "MAX_EFFECTIVE_LEVERAGE", "RSI_LONG_MAX", "RSI_SHORT_MIN",
         "STOCH_LONG_MAX", "STOCH_SHORT_MIN", "VOL_SPIKE_MIN", "SPOT_MIN_ORDER_USD",
     ]
@@ -919,12 +950,13 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "TELEGRAM_DAILY_SUMMARY_HOUR_ET",
         "ADAPTIVE_REDUCE_SCORE", "ADAPTIVE_EXIT_SCORE", "ADAPTIVE_CONFIRM_CYCLES", "ADAPTIVE_REENTRY_COOLDOWN_MINUTES",
         "SWING_PIVOT_LEFT_BARS", "SWING_PIVOT_RIGHT_BARS",
+        "NEUTRAL_REGIME_MAX_CONTRACTS",
     ]
     # STREAK_PAUSE_MINUTES is normalized for display only; apply_strategy_config always
     # derives the effective pause length from STREAK_PAUSE_HOURS (single source of truth,
     # see v30 fix note there) so editing only the hours field on the dashboard takes effect.
     float_keys += ["STREAK_PAUSE_HOURS", "STREAK_PAUSE_MINUTES"]
-    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE"]
+    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED"]
     for k in float_keys:
         cfg[k] = safe_float(cfg.get(k), safe_float(DEFAULT_STRATEGY_CONFIG.get(k), 0.0))
     for k in int_keys:
@@ -933,6 +965,27 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         cfg[k] = _bool_from_any(cfg.get(k), bool(DEFAULT_STRATEGY_CONFIG.get(k)))
     cfg["SPOT_TRANCHE_TARGETS_PCT"] = _pct_list(cfg.get("SPOT_TRANCHE_TARGETS_PCT"), SPOT_TRANCHE_TARGETS_PCT)
     return cfg
+
+
+def strategy_config_integrity(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Fail closed for entries when VM code and the live GCS policy diverge."""
+    actual_version = str((cfg or {}).get("CONFIG_VERSION") or "")
+    actual_sha256 = str((cfg or {}).get("CONFIG_CANONICAL_SHA256") or "")
+    version_match = actual_version == EXPECTED_CONFIG_VERSION
+    hash_match = bool(EXPECTED_CONFIG_SHA256 and actual_sha256 == EXPECTED_CONFIG_SHA256)
+    ok = bool(version_match and hash_match)
+    return {
+        "ok": ok,
+        "entries_allowed": ok,
+        "expected_version": EXPECTED_CONFIG_VERSION,
+        "active_version": actual_version,
+        "expected_sha256": EXPECTED_CONFIG_SHA256,
+        "active_sha256": actual_sha256,
+        "version_match": version_match,
+        "hash_match": hash_match,
+        "reason": "OK" if ok else "Live strategy configuration does not match deployed v45 policy; exits remain active but new entries/adds are blocked",
+        "checked_at": iso_utc(),
+    }
 
 
 def apply_strategy_config(cfg: Dict[str, Any]) -> None:
@@ -944,11 +997,11 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
     global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_ENTRY_GRACE_MINUTES, ADAPTIVE_MIN_ADVERSE_ATR, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
-    global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES
+    global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES, DAILY_NET_LOSS_LIMIT_USD
     global MIN_ENTRY_COOLDOWN_SECONDS, SPOT_TRANCHE_TARGETS_PCT, MIN_FUTURES_EQUITY_BUFFER_USD, MAX_EFFECTIVE_LEVERAGE
     global RSI_LONG_MAX, RSI_SHORT_MIN, STOCH_LONG_MAX, STOCH_SHORT_MIN, VOL_SPIKE_MIN
     global ENABLE_CORE_PERP_ENTRIES, ENABLE_SPOT_BRIDGE_PERP_BUYS, ENABLE_SPOT_BTC_TRADING, MANUAL_POSITION_MODE, DRY_RUN, SEND_EMAIL, EMAIL_FROM, EMAIL_TO, EMAIL_INCLUDE_RAW_ORDER, SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL, SEND_TELEGRAM, TELEGRAM_INCLUDE_ERRORS, TELEGRAM_DAILY_SUMMARY_ENABLED, TELEGRAM_DAILY_SUMMARY_HOUR_ET
-    global SPOT_MIN_ENTRY_SCORE, SPOT_FULL_SCORE, SPOT_MIN_ORDER_USD, MACRO_FAST_SMA, MACRO_SLOW_SMA
+    global SPOT_MIN_ENTRY_SCORE, SPOT_FULL_SCORE, SPOT_MIN_ORDER_USD, MACRO_FAST_SMA, MACRO_SLOW_SMA, COUNTERTREND_ENTRIES_ENABLED, NEUTRAL_REGIME_MAX_CONTRACTS
 
     CONTRACT_SIZE_BTC = safe_float(cfg.get("CONTRACT_SIZE_BTC"), CONTRACT_SIZE_BTC)
     MAX_CONVICTION_CONTRACTS = max(1, safe_int(cfg.get("MAX_CONVICTION_CONTRACTS"), MAX_CONVICTION_CONTRACTS))
@@ -971,6 +1024,9 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     MACRO_BLOCKED_PROBE_CONTRACTS = safe_int(cfg.get("MACRO_BLOCKED_PROBE_CONTRACTS"), CONTRACTS_PER_TRADE_PROBE)
     MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = safe_int(cfg.get("MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD"), MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD)
     MAX_POSITION_ADDS = safe_int(cfg.get("MAX_POSITION_ADDS"), MAX_POSITION_ADDS)
+    DAILY_NET_LOSS_LIMIT_USD = max(0.0, safe_float(cfg.get("DAILY_NET_LOSS_LIMIT_USD"), DAILY_NET_LOSS_LIMIT_USD))
+    COUNTERTREND_ENTRIES_ENABLED = _bool_from_any(cfg.get("COUNTERTREND_ENTRIES_ENABLED"), COUNTERTREND_ENTRIES_ENABLED)
+    NEUTRAL_REGIME_MAX_CONTRACTS = max(1, safe_int(cfg.get("NEUTRAL_REGIME_MAX_CONTRACTS"), NEUTRAL_REGIME_MAX_CONTRACTS))
     # v30 fix: these 13 fields were declared `global` above (signaling intent to make
     # them dashboard-configurable) but were never actually assigned here, so edits made
     # via strategy_config.json were silently dropped and the engine kept running on
@@ -1426,7 +1482,7 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v44_1_decision_contract",
+        "version": "larry_perp_v45_control_integrity",
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -1453,6 +1509,8 @@ def default_engine_state() -> Dict[str, Any]:
             "pause_until": None,
             "entries_halted": False,
             "halt_reason": None,
+            "daily_net_pnl_usd": 0.0,
+            "accounted_order_ids": [],
         },
         "position_controls": {
             "highest_price": None,
@@ -1471,6 +1529,9 @@ def default_engine_state() -> Dict[str, Any]:
             "adaptive_entry_at": None,
             "adaptive_entry_price": None,
             "adaptive_entry_baseline": None,
+            "adaptive_reduction_latched": False,
+            "adaptive_reduction_latched_at": None,
+            "adaptive_reduction_observation_id": None,
             "adaptive_defense": {},
         },
         "market_structure": {},
@@ -1517,6 +1578,7 @@ def default_engine_state() -> Dict[str, Any]:
             "last_add_confidence_pct": 0,
             "last_target_contracts": 0,
             "last_add_at": None,
+            "baseline_set_at": None,
             "note": "Progressive add-ons trade to a higher confidence target size, not repeated same-size adds.",
         },
     }
@@ -1528,6 +1590,8 @@ def reset_daily_risk_if_needed(state: Dict[str, Any]) -> None:
     if risk.get("daily_stop_date") != today:
         risk["daily_stop_date"] = today
         risk["daily_stop_hits"] = 0
+        risk["daily_net_pnl_usd"] = 0.0
+        risk["accounted_order_ids"] = []
         # v30 fix: loss_streak was only ever incremented (record_exit_risk_result),
         # never reset, so once the bot had accumulated LOSS_STREAK_LIMIT stop-outs
         # over its entire lifetime, every subsequent stop -- even months later, even
@@ -1544,6 +1608,13 @@ def reset_daily_risk_if_needed(state: Dict[str, Any]) -> None:
 def risk_allows_entry(state: Dict[str, Any]) -> Tuple[bool, str]:
     reset_daily_risk_if_needed(state)
     risk = state.setdefault("risk", {})
+    integrity = state.get("config_integrity") or {}
+    if integrity.get("entries_allowed") is False:
+        return False, integrity.get("reason") or "Strategy configuration integrity block"
+    if safe_float(risk.get("daily_net_pnl_usd"), 0.0) <= -abs(DAILY_NET_LOSS_LIMIT_USD):
+        risk["entries_halted"] = True
+        risk["halt_reason"] = "daily_net_loss_limit"
+        return False, f"Daily Larry net loss umbrella active: ${risk.get('daily_net_pnl_usd', 0.0):,.2f} <= -${abs(DAILY_NET_LOSS_LIMIT_USD):,.2f}"
     if safe_int(risk.get("daily_stop_hits")) >= DAILY_STOP_LIMIT:
         risk["entries_halted"] = True
         risk["halt_reason"] = "daily_stop_limit"
@@ -1771,6 +1842,13 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
             phantom.update({"state": "FUNDING_BLOCKED", "reason": reason})
             return None
 
+        macro_allowed, macro_reason = macro_allows_core_direction(
+            direction, state.get("macro_regime") or {}
+        )
+        if not macro_allowed:
+            reset_phantom_with_reason(state, macro_reason)
+            return None
+
         is_reversal_probe = bool(phantom.get("is_reversal_probe") or phantom.get("signal_class") == "REVERSAL_PROBE")
 
         # v19 safety/alignment: do not let a CORE phantom stay armed/committed
@@ -1819,7 +1897,11 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
             closed_start = last_closed_start()
             armed_candle_start = safe_float(phantom.get("armed_candle_start"), 0.0)
             candle_confirmed = bool(closed and (not armed_candle_start or closed_start > armed_candle_start))
-            evidence_ok = active_score(direction) >= SIGNAL_ARM_SCORE
+            # A 2/4 core setup may ARM, but the later candle is an execution
+            # commitment and must still meet the configured 3/4 commit bar.
+            evidence_ok = active_score(direction) >= (
+                SIGNAL_ARM_SCORE if is_reversal_probe else SIGNAL_COMMIT_SCORE
+            )
             if is_reversal_probe and not evidence_ok:
                 rp_dir, rp_score, rp_reason = reversal_probe_candidate(sig)
                 evidence_ok = (rp_dir == direction)
@@ -1831,7 +1913,7 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
                 return direction
             phantom["reason"] = (
                 f"{phantom.get('signal_class','CORE')} {direction} remains ARMED; "
-                f"waiting next closed candle confirmation; price={price:.2f} extension={extension_price:.2f} "
+                f"waiting next closed candle confirmation at commit score {SIGNAL_COMMIT_SCORE}/4; price={price:.2f} extension={extension_price:.2f} "
                 f"extension_achieved={bool(phantom.get('extension_achieved'))} expires_at={phantom.get('expires_at')}"
             )
             return None
@@ -1885,19 +1967,35 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
     macro_open_now = bool((state.get("macro_regime") or {}).get("gate_open"))
 
     if long_score >= SIGNAL_ARM_SCORE and long_score >= short_score:
-        core_decision = sizing_decision_for_signal("LONG", long_score, funding_rate, macro_open_now) if 'sizing_decision_for_signal' in globals() else {}
-        core_target = safe_int(core_decision.get("target_abs_contracts"), 0)
-        if core_target > 0:
-            candidate, candidate_score, candidate_class = "LONG", long_score, "CORE"
-        elif rp_dir == "LONG":
-            candidate, candidate_score, candidate_class = "LONG", rp_score, "REVERSAL_PROBE"
-            state.setdefault("last_blocked_action", {})["core_long"] = "Core LONG blocked by macro/target=0; using qualified reversal probe path"
+        macro_allowed, macro_reason = macro_allows_core_direction("LONG", state.get("macro_regime") or {})
+        if not macro_allowed:
+            state.setdefault("last_blocked_action", {})["core_long_macro"] = macro_reason
+            if short_score >= SIGNAL_ARM_SCORE and macro_allows_core_direction("SHORT", state.get("macro_regime") or {})[0]:
+                candidate, candidate_score, candidate_class = "SHORT", short_score, "CORE"
         else:
-            state.setdefault("last_blocked_action", {})["core_long"] = "Core LONG blocked by macro/target=0; no qualified reversal probe"
+            core_decision = sizing_decision_for_signal("LONG", long_score, funding_rate, macro_open_now) if 'sizing_decision_for_signal' in globals() else {}
+            core_target = safe_int(core_decision.get("target_abs_contracts"), 0)
+            if core_target > 0:
+                candidate, candidate_score, candidate_class = "LONG", long_score, "CORE"
+            elif rp_dir == "LONG":
+                candidate, candidate_score, candidate_class = "LONG", rp_score, "REVERSAL_PROBE"
+                state.setdefault("last_blocked_action", {})["core_long"] = "Core LONG blocked by macro/target=0; using qualified reversal probe path"
+            else:
+                state.setdefault("last_blocked_action", {})["core_long"] = "Core LONG blocked by macro/target=0; no qualified reversal probe"
     elif short_score >= SIGNAL_ARM_SCORE:
-        candidate, candidate_score, candidate_class = "SHORT", short_score, "CORE"
+        macro_allowed, macro_reason = macro_allows_core_direction("SHORT", state.get("macro_regime") or {})
+        if macro_allowed:
+            candidate, candidate_score, candidate_class = "SHORT", short_score, "CORE"
+        else:
+            state.setdefault("last_blocked_action", {})["core_short_macro"] = macro_reason
     elif rp_dir:
-        candidate, candidate_score, candidate_class = rp_dir, rp_score, "REVERSAL_PROBE"
+        rp_macro_allowed, rp_macro_reason = macro_allows_core_direction(
+            rp_dir, state.get("macro_regime") or {}
+        )
+        if rp_macro_allowed:
+            candidate, candidate_score, candidate_class = rp_dir, rp_score, "REVERSAL_PROBE"
+        else:
+            state.setdefault("last_blocked_action", {})["reversal_probe_macro"] = rp_macro_reason
 
     if not candidate:
         rp = state.get("last_reversal_probe_check") or {}
@@ -2548,12 +2646,16 @@ def ledger_running_totals(gcs: GCS) -> Dict[str, Any]:
             if ok and net not in (None, ""):
                 rec["net_realized_pnl_usd"] = safe_float(net, 0.0)
                 realized.append(rec)
-    net_realized_total = sum(safe_float(r.get("net_realized_pnl_usd"), 0.0) for r in realized)
+    gross_realized_total = sum(safe_float(r.get("gross_realized_pnl_usd"), 0.0) for r in realized)
+    # Fee-complete strategy P&L: entries/adds have no gross realization but their
+    # commissions are real lifecycle costs and must not disappear from results.
+    net_realized_total = gross_realized_total - fees_total
     last_realized = realized[-1] if realized else None
     return {
         "trade_count": len(successes),
         "realized_trade_count": len(realized),
         "fees_usd": fees_total,
+        "gross_realized_pnl_usd": gross_realized_total,
         "net_realized_pnl_usd": net_realized_total,
         "last_realized_net_pnl_usd": safe_float(last_realized.get("net_realized_pnl_usd"), None) if last_realized else None,
         "last_realized_reason": last_realized.get("reason") if last_realized else None,
@@ -2964,9 +3066,15 @@ def update_position_version(controls: Dict[str, Any], live_pos: Dict[str, Any], 
             # A same-side quantity-only reduction preserves the valid trailing
             # stop while transferring ownership to the new position version.
             controls["tsl_position_version"] = controls["position_version"]
-        controls["adaptive_entry_at"] = iso_utc()
-        controls["adaptive_entry_price"] = avg
-        controls["adaptive_entry_baseline"] = None
+        if new_trade:
+            # A quantity-only reduction is still the same thesis/defence episode.
+            # Do not restart grace or erase deterioration evidence after each cut.
+            controls["adaptive_entry_at"] = iso_utc()
+            controls["adaptive_entry_price"] = avg
+            controls["adaptive_entry_baseline"] = None
+            controls["adaptive_reduction_latched"] = False
+            controls["adaptive_reduction_latched_at"] = None
+            controls["adaptive_reduction_observation_id"] = None
         controls["position_reanchor"] = {
             "version": controls["position_version"], "previous_fingerprint": previous,
             "new_fingerprint": fingerprint, "signed_contracts": signed,
@@ -3047,16 +3155,32 @@ def adaptive_defense_snapshot(state: Dict[str, Any], live_pos: Dict[str, Any], s
     defense_eligible = emergency_during_grace or ordinary_eligible
 
     prior = (controls.get("adaptive_defense") or {})
-    cycles = (
-        safe_int(prior.get("confirm_cycles"), 0) + 1
-        if defense_eligible and score >= ADAPTIVE_REDUCE_SCORE
-        else 0
-    )
+    closed_observation_id = None
+    if len(candles) >= 2:
+        closed_observation_id = str(candles[-2].get("start") or candles[-2].get("time") or "") or None
+    prior_observation_id = prior.get("last_confirmation_observation_id")
+    qualifies = bool(defense_eligible and score >= ADAPTIVE_REDUCE_SCORE)
+    if not qualifies:
+        cycles = 0
+    elif closed_observation_id and closed_observation_id != prior_observation_id:
+        cycles = safe_int(prior.get("confirm_cycles"), 0) + 1
+    else:
+        # Re-reading the same hourly candle is not new confirmation evidence.
+        cycles = safe_int(prior.get("confirm_cycles"), 0)
+
+    recovered = bool(score < ADAPTIVE_REDUCE_SCORE and adverse_atr < ADAPTIVE_MIN_ADVERSE_ATR)
+    if recovered:
+        controls["adaptive_reduction_latched"] = False
+        controls["adaptive_reduction_latched_at"] = None
+        controls["adaptive_reduction_observation_id"] = None
+    reduction_latched = bool(controls.get("adaptive_reduction_latched"))
     action = "HOLD"
     if defense_eligible and score >= ADAPTIVE_EXIT_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
         action = "EXIT"
-    elif defense_eligible and score >= ADAPTIVE_REDUCE_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES:
+    elif defense_eligible and score >= ADAPTIVE_REDUCE_SCORE and cycles >= ADAPTIVE_CONFIRM_CYCLES and not reduction_latched:
         action = "REDUCE_ONE_RUNG"
+    elif reduction_latched and defense_eligible and score >= ADAPTIVE_REDUCE_SCORE:
+        action = "REDUCTION_LATCHED"
     elif defense_eligible and score >= ADAPTIVE_REDUCE_SCORE:
         action = "CONFIRMING"
     return {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": score, "state": action,
@@ -3069,7 +3193,11 @@ def adaptive_defense_snapshot(state: Dict[str, Any], live_pos: Dict[str, Any], s
             "baseline_score": baseline.get("score"), "score_delta": score_delta,
             "new_factors": new_factors, "post_entry_deterioration": post_entry_deterioration,
             "emergency_during_grace": emergency_during_grace,
-            "eligible": defense_eligible}
+            "eligible": defense_eligible,
+            "last_confirmation_observation_id": closed_observation_id or prior_observation_id,
+            "new_confirmation_observation": bool(closed_observation_id and closed_observation_id != prior_observation_id),
+            "reduction_latched": reduction_latched,
+            "recovered": recovered}
 
 
 def start_adaptive_reentry_guard(state: Dict[str, Any], side: str, reason: str) -> Dict[str, Any]:
@@ -3356,14 +3484,38 @@ def risk_exit_target_if_needed(live_pos: Dict[str, Any], controls: Dict[str, Any
     return None, None
 
 
-def record_exit_risk_result(state: Dict[str, Any], reason: str) -> None:
+def record_trade_risk_result(state: Dict[str, Any], result: Dict[str, Any], reason: str) -> None:
+    """Account for every confirmed Larry order once, using economics not labels."""
+    if not result or not result.get("ok") or (result.get("plan") or {}).get("action") in (None, "NONE"):
+        return
+    reset_daily_risk_if_needed(state)
     risk = state.setdefault("risk", {})
-    if "STOP" in reason:
-        risk["daily_stop_hits"] = safe_int(risk.get("daily_stop_hits")) + 1
-        risk["loss_streak"] = safe_int(risk.get("loss_streak")) + 1
-        if safe_int(risk.get("loss_streak")) >= LOSS_STREAK_LIMIT:
-            risk["pause_until"] = (now_utc() + timedelta(minutes=STREAK_PAUSE_MINUTES)).isoformat()
-            risk["halt_reason"] = "post_stop_cooldown"
+    order = result.get("order") or {}
+    order_key = str(order.get("order_id") or order.get("client_order_id") or "")
+    accounted = list(risk.get("accounted_order_ids") or [])
+    if order_key and order_key in accounted:
+        return
+    if order_key:
+        accounted.append(order_key)
+        risk["accounted_order_ids"] = accounted[-100:]
+
+    fees = safe_float(result.get("fees_usd"), safe_float((result.get("fills") or {}).get("commission"), 0.0))
+    gross = result.get("gross_realized_pnl_usd")
+    impact = (safe_float(gross, 0.0) if gross is not None else 0.0) - fees
+    risk["daily_net_pnl_usd"] = safe_float(risk.get("daily_net_pnl_usd"), 0.0) + impact
+    risk["last_trade_impact_usd"] = impact
+    risk["last_trade_reason"] = reason
+    risk["last_trade_accounted_at"] = iso_utc()
+
+    if result.get("is_exit_trade"):
+        if impact < 0:
+            risk["daily_stop_hits"] = safe_int(risk.get("daily_stop_hits")) + 1
+            risk["loss_streak"] = safe_int(risk.get("loss_streak")) + 1
+            if safe_int(risk.get("loss_streak")) >= LOSS_STREAK_LIMIT:
+                risk["pause_until"] = (now_utc() + timedelta(minutes=STREAK_PAUSE_MINUTES)).isoformat()
+                risk["halt_reason"] = "post_loss_cooldown"
+        elif impact > 0:
+            risk["loss_streak"] = 0
 
 
 def recover_bot_managed_position_from_ledger(gcs: GCS, state: Dict[str, Any], live_pos: Dict[str, Any]) -> bool:
@@ -3760,7 +3912,11 @@ def calculate_macro_regime_from_candles(candles: List[Dict[str, float]]) -> Dict
     price = closes[-1] if closes else 0.0
     fast = sma(closes, MACRO_FAST_SMA)
     slow = sma(closes, MACRO_SLOW_SMA)
-    gate_open = bool(price and fast and slow and price > fast and price > slow and fast > slow)
+    bullish = bool(price and fast and slow and price > fast and price > slow and fast > slow)
+    bearish = bool(price and fast and slow and price < fast and price < slow and fast < slow)
+    state = "BULLISH" if bullish else "BEARISH" if bearish else "NEUTRAL"
+    # Backward-compatible LONG gate. Directional entry policy uses `state`.
+    gate_open = state in ("BULLISH", "NEUTRAL")
     return {
         "price": price,
         "fast_sma": fast,
@@ -3768,9 +3924,27 @@ def calculate_macro_regime_from_candles(candles: List[Dict[str, float]]) -> Dict
         "fast_period": MACRO_FAST_SMA,
         "slow_period": MACRO_SLOW_SMA,
         "gate_open": gate_open,
-        "state": "BULLISH" if gate_open else "BLOCKED",
-        "reason": "Price > fast SMA, price > slow SMA, fast SMA > slow SMA" if gate_open else "Macro gate blocked: requires price > fast SMA, price > slow SMA, and fast SMA > slow SMA",
+        "state": state,
+        "bullish": bullish,
+        "bearish": bearish,
+        "reason": (
+            "Bullish: price > fast SMA, price > slow SMA, fast SMA > slow SMA" if bullish else
+            "Bearish: price < fast SMA, price < slow SMA, fast SMA < slow SMA" if bearish else
+            "Neutral/transition: trend alignment is mixed"
+        ),
     }
+
+
+def macro_allows_core_direction(direction: str, macro: Dict[str, Any]) -> Tuple[bool, str]:
+    regime = str((macro or {}).get("state") or "NEUTRAL").upper()
+    direction = str(direction or "").upper()
+    if COUNTERTREND_ENTRIES_ENABLED:
+        return True, "Countertrend entries enabled"
+    if regime == "BULLISH" and direction == "SHORT":
+        return False, "Directional macro block: new SHORT prohibited in BULLISH regime"
+    if regime == "BEARISH" and direction == "LONG":
+        return False, "Directional macro block: new LONG prohibited in BEARISH regime"
+    return True, "Directional macro aligned or neutral"
 
 
 def get_spot_accounts(cb: Any) -> Dict[str, float]:
@@ -4203,6 +4377,14 @@ def core_target_for_signal(current_signed: int, signal: str, score: int = 3, fun
     return current_signed
 
 
+def enforce_core_monotonic_target(current_signed: int, target_signed: int) -> Tuple[int, str]:
+    """Core entry logic may hold/add/flip, but never trim a same-side position."""
+    if current_signed and target_signed and (current_signed > 0) == (target_signed > 0):
+        if abs(target_signed) < abs(current_signed):
+            return current_signed, "core_sizing_reduction_blocked"
+    return target_signed, "OK"
+
+
 def should_allow_progressive_add(state: Dict[str, Any], current_signed: int, target_signed: int, decision: Dict[str, Any]) -> Tuple[bool, str]:
     """Prevent repeated add spam while still allowing probe->partial->full scaling.
 
@@ -4235,9 +4417,17 @@ def record_progressive_add(state: Dict[str, Any], result: Dict[str, Any], decisi
     before_signed = safe_int(before.get("signed_contracts"), 0)
     after_signed = safe_int(after.get("signed_contracts"), 0)
     if before_signed == 0 or (before_signed > 0) != (after_signed > 0):
-        # A fresh entry or reversal establishes a new position; it is not an
-        # add-on and must start with a clean extension allowance.
-        state["add_on_state"] = default_engine_state()["add_on_state"]
+        # A fresh entry is not an add, but its confidence/target is the baseline
+        # that every later add must materially improve upon.
+        baseline = default_engine_state()["add_on_state"]
+        baseline.update({
+            "position_id": f"{PERP_PRODUCT_ID}:{after.get('side')}:{after.get('avg_entry_price')}",
+            "direction": after.get("side"),
+            "last_add_confidence_pct": safe_int(decision.get("confidence_pct"), 0),
+            "last_target_contracts": abs(after_signed),
+            "baseline_set_at": iso_utc(),
+        })
+        state["add_on_state"] = baseline
         return
     if abs(after_signed) <= abs(before_signed):
         return
@@ -4700,7 +4890,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v44_1_decision_contract",
+        "version": "larry_perp_v45_control_integrity",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -4816,6 +5006,9 @@ def run_once(cb: Any, gcs: GCS) -> None:
     strategy_cfg = load_strategy_config(gcs)
     apply_strategy_config(strategy_cfg)
     state["active_strategy_config"] = strategy_cfg
+    state["config_integrity"] = strategy_config_integrity(strategy_cfg)
+    if not state["config_integrity"].get("ok"):
+        log.error("CONFIG INTEGRITY BLOCK: %s", state["config_integrity"])
     # The cooldown duration is live configuration, not historical position
     # state. Replace the persisted value every cycle so config changes apply.
     state.setdefault("cooldowns", {})["min_seconds"] = MIN_ENTRY_COOLDOWN_SECONDS
@@ -4931,6 +5124,13 @@ def run_once(cb: Any, gcs: GCS) -> None:
         is_tp1 = (exit_reason or "").startswith(("TP1_PARTIAL_", "TP1_LADDER_STEPDOWN_"))
         if last_result.get("ok") and abs(after_signed) < abs(before_signed):
             if (exit_reason or "").startswith("ADAPTIVE_DEFENSE_"):
+                if (exit_reason or "").startswith("ADAPTIVE_DEFENSE_REDUCE_"):
+                    pc = state.setdefault("position_controls", default_engine_state()["position_controls"])
+                    pc["adaptive_reduction_latched"] = True
+                    pc["adaptive_reduction_latched_at"] = iso_utc()
+                    pc["adaptive_reduction_observation_id"] = (
+                        (pc.get("adaptive_defense") or {}).get("last_confirmation_observation_id")
+                    )
                 start_adaptive_reentry_guard(
                     state,
                     "LONG" if before_signed > 0 else "SHORT",
@@ -4946,8 +5146,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
                 # broke; don't let stale stop-outs from an earlier winning cycle
                 # keep counting toward LOSS_STREAK_LIMIT.
                 state.setdefault("risk", {})["loss_streak"] = 0
-            else:
-                record_exit_risk_result(state, exit_reason or "RISK_EXIT")
+            record_trade_risk_result(state, last_result, exit_reason or "RISK_EXIT")
             if after_signed == 0 and ("STOP" in (exit_reason or "") or "ADAPTIVE_DEFENSE_EXIT" in (exit_reason or "")):
                 previous_sb = state.get("stop_blown") or {}
                 history = state.setdefault("stop_blown_history", [])
@@ -5031,6 +5230,13 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             decision_ext["leverage_resized"] = True
                             decision_ext["resize_note"] = guard_reason_ext
                         plan_ext["sizing_decision"] = decision_ext
+                        extension_direction = "LONG" if live_signed_for_ext > 0 else "SHORT"
+                        macro_ext_ok, macro_ext_reason = macro_allows_core_direction(extension_direction, state.get("macro_regime") or {})
+                        add_ext_ok, add_ext_reason = should_allow_progressive_add(state, live_signed_for_ext, target_ext, decision_ext)
+                        if not macro_ext_ok:
+                            ok_ext, guard_reason_ext = False, macro_ext_reason
+                        elif not add_ext_ok:
+                            ok_ext, guard_reason_ext = False, add_ext_reason
                         state["last_core_target_plan"] = plan_ext
                         state["last_portfolio_guard"] = {"ok": ok_ext, "reason": guard_reason_ext, **guard_ext}
                         if ok_ext and plan_ext.get("action") not in (None, "NONE"):
@@ -5042,6 +5248,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
                                 mark_cooldown(state, cd_key_ext)
                                 sync_bot_managed_position_after_trade(state, extension_add_result, "PHANTOM_EXTENSION_ADD_ON")
                                 record_progressive_add(state, extension_add_result, decision_ext)
+                                record_trade_risk_result(state, extension_add_result, "PHANTOM_EXTENSION_ADD_ON")
                         else:
                             state.setdefault("last_blocked_action", {})["perp_extension_add"] = guard_reason_ext
                 else:
@@ -5129,6 +5336,13 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             sizing_decision["target_abs_contracts"] = probe_abs
                             sizing_decision["final_contracts"] = probe_abs
                             sizing_decision["reason"] = "fresh_post_adaptive_setup_probe"
+                        if str((state.get("macro_regime") or {}).get("state") or "").upper() == "NEUTRAL":
+                            neutral_cap = max(1, min(NEUTRAL_REGIME_MAX_CONTRACTS, MAX_CONVICTION_CONTRACTS))
+                            target = clamp_target((1 if confirmed == "LONG" else -1) * min(abs(target), neutral_cap))
+                            sizing_decision["neutral_regime_cap"] = True
+                            sizing_decision["target_abs_contracts"] = abs(target)
+                            sizing_decision["final_contracts"] = abs(target)
+                            sizing_decision["reason"] = "neutral_regime_probe_cap"
                         # v31: resize BEFORE building the plan / progressive-add check so
                         # everything downstream sees the leverage-capped target. A strong
                         # signal now executes at the largest safe size instead of being
@@ -5139,6 +5353,12 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             sizing_decision["target_abs_contracts"] = abs(target)
                             sizing_decision["final_contracts"] = abs(target)
                             sizing_decision["resize_note"] = guard_reason
+                        target, monotonic_reason = enforce_core_monotonic_target(live_now["signed_contracts"], target)
+                        if monotonic_reason != "OK":
+                            sizing_decision["monotonic_hold"] = True
+                            sizing_decision["target_abs_contracts"] = abs(target)
+                            sizing_decision["final_contracts"] = abs(target)
+                            sizing_decision["reason"] = monotonic_reason
                         plan_preview = safe_target_order_plan(live_now["signed_contracts"], target)
                         plan_preview["sizing_decision"] = sizing_decision
                         add_ok, add_reason = should_allow_progressive_add(state, live_now["signed_contracts"], target, sizing_decision)
@@ -5199,6 +5419,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
                                     mark_cooldown(state, "perp_last_short_entry_at")
                                 sync_bot_managed_position_after_trade(state, last_result, core_reason)
                                 record_progressive_add(state, last_result, sizing_decision)
+                                record_trade_risk_result(state, last_result, core_reason)
                                 if _guarded_reentry:
                                     resolve_adaptive_reentry_guard(state, confirmed, _setup_id)
                             state["phantom"] = default_engine_state()["phantom"]
