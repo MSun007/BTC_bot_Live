@@ -4006,10 +4006,16 @@ function renderPortfolio(po){
 function renderPositionLegs(d){
  const es=d.engine_state||{}, cfg=d.config||{}, book=es.position_legs||{}, legs=(book.legs||[]).filter(x=>x&&x.status==='OPEN'&&Number(x.remaining_contracts||0)>0);
  const grid=$('positionLegGrid'), summary=$('legSummary'); if(!grid||!summary)return;
+ const legSection=grid.closest('section'), advanced=document.querySelector('details.advanced-diagnostics');
+ if(legSection&&advanced&&advanced.contains(legSection)){advanced.parentNode.insertBefore(legSection,advanced)}
  const ok=book.reconciled===true, money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2}):'--';
  summary.textContent=`${ok?'RECONCILED':'DRIFT - NEW RISK BLOCKED'} | Internal ${book.internal_signed_contracts??0} / Coinbase ${book.exchange_signed_contracts??0} contracts`;
  grid.innerHTML=legs.length?legs.map((l,i)=>{const kind=String(l.kind||'LEG'), side=String(l.side||'--'), cls=kind==='CORE'?'core':'add'; return `<div class="leg-card ${cls}"><div class="leg-head"><div class="leg-name">${kind} ${i+1} | ${side} ${l.remaining_contracts}</div><div class="leg-badge">${l.tsl_active?'TSL ACTIVE':'PROTECTED'}</div></div><div class="leg-kv"><span>Entry</span><span>${money(l.entry_price)}</span><span>Open P&amp;L</span><span>${money(l.unrealized_pnl_usd)}</span><span>Entry conviction</span><span>${l.entry_score||'--'}/4 | ${l.entry_confidence_pct||'--'}%</span><span>Firm 1.5x ATR stop</span><span>${money(l.firm_stop)}</span><span>TP1 (${Number(cfg.LEG_TP1_R_MULTIPLE||1.25).toFixed(2)}R)</span><span>${money(l.tp1_trigger)}${l.tp1_done?' | taken':''}</span><span>TSL activation</span><span>${money(l.tsl_activation)}</span><span>TSL stop</span><span>${money(l.tsl_stop)}</span><span>Fees allocated</span><span>${money(l.allocated_fees_usd)}</span></div></div>`}).join(''):'<div class="tm-empty">No open Larry legs.</div>';
- const dep=es.deployment||{}; set('deploymentVersion',`Dashboard v46 | deployed 2026-08-10 | Engine ${dep.version||es.version||'--'}${dep.deployed_at?' | '+dep.deployed_at:''}`);
+ const dep=es.deployment||{}, versionText=`Dashboard v46 | deployed 2026-08-10 | Engine ${dep.version||es.version||'--'}${dep.deployed_at?' | '+dep.deployed_at:''}`;
+ set('deploymentVersion',versionText);
+ let versionPill=$('deploymentVersionPill');
+ if(!versionPill){versionPill=document.createElement('span');versionPill.id='deploymentVersionPill';versionPill.className='pill purple';document.querySelector('header .pill-row')?.prepend(versionPill)}
+ versionPill.textContent=versionText;
 }
 
 function renderReconciler(rec){
