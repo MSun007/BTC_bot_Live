@@ -4116,7 +4116,7 @@ function updateSizingPreview(cfg){
  const step=(v)=>{ const lower=rungs.filter(x=>x<v); return lower.length?Math.max(...lower):0; };
  const tpLine=`${max}→${step(max)} · ${strong}→${step(strong)} · ${partial}→${step(partial)} · ${probe}→${step(probe)} · 1→0`;
  const el=document.getElementById('sizingPreview');
- if(el){ el.innerHTML = `Sizing ladder from Max <b>${max}</b>: Probe <b>${probe}</b> (${probePct.toFixed(0)}%) → Partial <b>${partial}</b> (${partialPct.toFixed(0)}%) → Strong <b>${strong}</b> (${strongPct.toFixed(0)}%) → Full <b>${max}</b>. Max adds/position: <b>${adds}</b>.<br><span class="mini">TP step-down ladder: ${tpLine}. Whole contracts only; probe keeps a 1-contract runner.</span>`; }
+ if(el){ const ladderLine=configuredLadder.length?configuredLadder.join(' → '):`${probe} → ${partial} → ${strong} → ${max}`; el.innerHTML = `Executable position ladder: <b>${ladderLine}</b>. Maximum adds per position: <b>${adds}</b>.<br><span class="mini">Confidence tiers remain signal labels; execution advances by no more than one configured rung per decision.</span>`; }
 }
 
 function setControlValues(cfg){
@@ -4272,7 +4272,7 @@ function renderBTCTriggerMap(d){
  const longScore=Number(sig.score ?? pm.long_score ?? 0); const shortScore=Number(pm.short_score ?? 0); const macroOpen=mac.gate_open===true;
  let next='No immediate action. Monitoring signal score, phantom confirmation, funding, cooldowns, and risk gate.'; let nextClass='blue';
  if(es.kill_switch && es.kill_switch.halt){ next='KILL SWITCH ACTIVE: all order placement is halted.'; nextClass='bad'; }
- else if(pr.manual_monitor_only){ next='Manual perp exposure detected: Larry is monitor-only and will not place ATR/TSL/TP1 exits against it.'; nextClass='purple'; }
+ else if(pr.manual_monitor_only && Math.abs(Number(pr.contracts||0))>0){ next='Manual perp exposure detected: Larry is monitor-only and will not place ATR/TSL/TP1 exits against it.'; nextClass='purple'; }
  else if(phantom.state==='PHANTOM_ARMED'){ next=`${phantom.direction||''} phantom armed. Waiting for extension level ${usd(phantomExt)} then closed-candle reversal.`; nextClass='warn'; }
  else if(phantom.state==='EXTENSION_CONFIRMED'){ next=`${phantom.direction||''} extension confirmed. Waiting for last closed candle confirmation.`; nextClass='warn'; }
  else if(longScore>=3 && macroOpen){ next=`Spot/Perp LONG setup building: long score ${longScore}/4 and macro gate open.`; nextClass='good'; }
@@ -4376,9 +4376,11 @@ function renderV12Transparency(d){
  const rungs=[...new Set([0,1,probe,part,strong,mx])].sort((a,b)=>a-b); const step=(v)=>{const lower=rungs.filter(x=>x<v); return lower.length?Math.max(...lower):0};
  const tpLine=`${mx}→${step(mx)} · ${strong}→${step(strong)} · ${part}→${step(part)} · ${probe}→${step(probe)} · 1→0`;
  const trig=(cfg.TP1_DYNAMIC_BY_LADDER===false)?`Fixed ${(Number(cfg.TP1_PCT||0.0075)*100).toFixed(2)}%`:`Probe/Partial ${(Number(cfg.TP1_PROBE_TRIGGER_PCT||0.0075)*100).toFixed(2)}% · Strong ${(Number(cfg.TP1_STRONG_TRIGGER_PCT||0.006)*100).toFixed(2)}% · Full ${(Number(cfg.TP1_FULL_TRIGGER_PCT||0.005)*100).toFixed(2)}%`;
- set('v12Sizing', `Probe ${probe} · Partial ${part} · Strong ${strong} · Full ${mx}`);
+ const configuredLadder=Array.isArray(cfg.POSITION_SIZE_LADDER)?cfg.POSITION_SIZE_LADDER.map(Number).filter(x=>x>0).sort((a,b)=>a-b):[];
+ const ladderText=(configuredLadder.length?configuredLadder:[probe,part,strong,mx]).join(' → ');
+ set('v12Sizing', `Position ladder ${ladderText}`);
  const addState = es.add_on_state || {};
- set('v12SizingNote', `Max conviction ${mx} contracts. Tiers derive from Max and round to whole contracts. TP step-down: ${tpLine}. TP triggers: ${trig}. Progressive add-ons ${cfg.PROGRESSIVE_ADD_ONS_ENABLED===false?'OFF':'ON'}: target size rises only when confidence improves. Last sizing: confidence ${sd.confidence_pct ?? '—'}%, target ${sd.target_abs_contracts ?? sd.final_contracts ?? '—'} contracts, reason ${sd.reason || 'waiting'}. Add state: ${addState.adds_count ?? 0}/${cfg.MAX_POSITION_ADDS||3} adds, last confidence ${addState.last_add_confidence_pct ?? 0}%, last target ${addState.last_target_contracts ?? 0}. Macro-blocked probe: ${cfg.SCORE4_MACRO_OVERRIDE_ENABLED?'ON':'OFF'} / ${probe} contracts. Phantom extension target: ${ph.extension_price?usd(ph.extension_price):'—'}; achieved ${ph.extension_achieved?'YES':'NO'}.`);
+ set('v12SizingNote', `Initial entry ${configuredLadder[0]||probe} contracts; one rung maximum per decision; hard cap ${mx}. Every add is an independent risk leg. The first add may use a bounded pullback up to ${Number(cfg.PULLBACK_MAX_ADVERSE_ATR||0.35).toFixed(2)} ATR; later adds require profit after costs. Add state: ${addState.adds_count ?? 0}/${cfg.MAX_POSITION_ADDS||4}. Last sizing reason: ${sd.reason || 'waiting'}.`);
  const rate = Number((fund&&fund.rate)!=null?fund.rate:0); const lb=fundingBucket('LONG',rate,cfg), sb=fundingBucket('SHORT',rate,cfg);
  set('v12Funding', `L ${lb} / S ${sb}`); setClass('v12Funding','v12-val '+((lb==='BLOCK'||sb==='BLOCK')?'bad':(lb==='PARTIAL'||sb==='PARTIAL')?'warn':'good'));
  set('v12FundingNote', `Rate ${rate?rate.toFixed(6):'—'} · reduce at ±${Number(cfg.FUNDING_SIZE_REDUCE_AT||0.0005).toFixed(4)} · hard gates +${Number(cfg.FUNDING_LONG_MAX||0.001).toFixed(4)} / ${Number(cfg.FUNDING_SHORT_MIN||-0.001).toFixed(4)}.`);
@@ -4677,7 +4679,10 @@ function renderLarryMindset(d){
  set('mindsetDecision',decision); set('mindsetReason',String(reason).replaceAll('_',' ').slice(0,260)); set('mindsetBadge',badge); setClass('mindsetBadge','mindset-badge '+badgeClass);
  set('mindsetRegime',`${macroOpen?'Macro open':'Macro blocked'} · ${fundingOk?'Funding OK':'Funding check'}`); set('mindsetRegimeNote',riskOk?'Risk gate allows entries':'Risk gate blocks entries');
  set('mindsetTrigger',`LONG ${ls}/4 · SHORT ${ss}/4`); set('mindsetTriggerNote',`Arm ${arm}/4 · commit ${commit}/4 · ${String(diag.next_action||'waiting').replaceAll('_',' ')}`);
- set('mindsetConviction',`${tier} · target ${num(target,0)}`); set('mindsetConvictionNote',`Scale: probe ${probe} · partial ${partial} · strong ${strong} · full ${maxN}`);
+ const positionLadder=Array.isArray(cfg.POSITION_SIZE_LADDER)?cfg.POSITION_SIZE_LADDER.map(Number).filter(x=>x>0).sort((a,b)=>a-b):[probe,partial,strong,maxN];
+ const currentAbs=Math.abs(Number(contracts||0));
+ const executableNext=hasPosition?(positionLadder.find(x=>x>currentAbs && x<=Number(target||maxN))||currentAbs):(positionLadder[0]||probe);
+ set('mindsetConviction',`${tier} · next ${num(executableNext,0)}`); set('mindsetConvictionNote',`Executable ladder: ${positionLadder.join(' → ')} · one rung per decision`);
  set('mindsetPosition',hasPosition?`${pr.side||direction} · ${num(contracts,0)} contracts`:'FLAT · no position'); set('mindsetPositionNote',hasPosition?(es.add_on_state&&es.add_on_state.adds_count?`${es.add_on_state.adds_count}/${cfg.MAX_POSITION_ADDS||3} progressive adds used`:'No progressive add recorded'):'Waiting for a committed entry');
  const exitValue=!hasPosition?'Not armed':!autoManaged?'DISPLAY ONLY — NO AUTO EXIT':pr.tsl_active?'Trailing stop active':pc.tp1_done===true?'TP step done':'ATR stop active';
  set('mindsetExit',exitValue); set('mindsetExitNote',hasPosition?(!autoManaged?`Calculated stop ${pr.active_stop?usd(pr.active_stop):'—'} · Larry will not execute it`:`Executable stop ${pr.active_stop?usd(pr.active_stop):'—'} · trail activates ${pr.tsl_activation_price?usd(pr.tsl_activation_price):'—'}`):'Exit levels initialize at entry');

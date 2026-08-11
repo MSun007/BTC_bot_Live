@@ -437,23 +437,26 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
-### v46 independent position legs — August 10, 2026
+### v47 progressive position-leg ladder — August 11, 2026
 
-Larry now keeps an internal lot-level risk book even though Coinbase exposes one
+Larry keeps an internal lot-level risk book even though Coinbase exposes one
 netted futures position. An existing live position is migrated once as the CORE
 leg using the exchange average and the locked ATR already present in engine state.
 Every later ADD receives its own immutable entry, ATR, 1.5x ATR firm stop, TP1,
 TSL activation/high-water mark, remaining quantity, fees and realized/open P&L.
 
-New-risk rules are deliberately tighter:
+Entry and scaling rules:
 
 - a new core entry requires a fresh 4/4 closed-candle confirmation;
-- initial entries are capped at four contracts;
-- at most one two-contract add is permitted;
-- an add requires a fresh same-side 4/4 setup, maintained-or-better conviction,
-  and at least 0.16% favorable progress from the existing leg anchors;
-- adverse phantom-extension pyramiding is disabled;
-- TP1 is 1.25R and the leg TSL arms at 1.0R while the firm stop remains 1.5x ATR;
+- initial entries are exactly capped at the first four-contract rung;
+- total exposure follows `4 -> 6 -> 10 -> 15 -> 20`, with at most one rung
+  added per decision cycle and 20 contracts as the absolute cap;
+- every add requires a fresh same-side 4/4 closed-candle setup;
+- the first `4 -> 6` add may occur on a pullback only while the score remains
+  4/4 and adverse movement is no more than 0.35 locked ATR;
+- later adds require the existing position to be profitable after estimated
+  trading costs and may not use the pullback exception;
+- each leg takes TP1 at 1.0R, arms its TSL at 1.25R, and retains a 1.5 ATR firm stop;
 - internal signed leg quantity must equal Coinbase signed quantity or all new
   entries/adds fail closed while protective monitoring remains visible.
 
@@ -463,6 +466,23 @@ the dashboard/engine version and deployment date. The durable per-leg audit log 
 
 The exchange remains the authority for total contracts and fills. Internal legs
 are Larry's risk/accounting allocation and must always reconcile to that net total.
+
+Track-record inception was `2026-08-11T16:25:57Z`, verified flat, with a
+manual $2,000 baseline and zero Larry P&L. New trades use
+`gs://btc_trade_log/perp_trades_ledger_v47.csv`; the prior ledger is preserved
+as a pre-inception archive. Strategy parameters should remain frozen for the
+8-12 week measurement window except for versioned safety, execution, or
+data-integrity fixes.
+
+Production deployment:
+
+- Release commits: `a345beaa0d3d3af5617788dddfa9698211aa6171` and metadata follow-up `fa754ae733de121d4e89a181a65c5823addf9dcc`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine/dashboard: v47
+- Exchange position at inception: `FLAT 0`
+- Regression suite: 48 tests
+- VM engine backup: `/home/msunderji/larry_perp_v1.py.backup_pre_v47_20260811_1221`
+- GCS config backup: `gs://btc_trade_log/backups/strategy_config_pre_v47_20260811_1221.json`
 
 
 The v44 release adds structured trade-decision observability and bounded,
@@ -595,22 +615,3 @@ v35 production baseline:
 - First retry sizing: probe only
 - Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v35_20260723_1024`
 - Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v35_20260723_1024.json`
-## v47 progressive-leg track record (prepared, not deployed)
-
-Larry v47 uses a `4 -> 6 -> 10 -> 15 -> 20` total-position ladder. Every
-confirmed increase is recorded and managed as a new position leg with its own
-fill price, locked ATR, firm stop, TP1 and trailing-stop lifecycle. The first
-`4 -> 6` increase may be bought/sold into a bounded pullback of no more than
-0.35 ATR when the score remains strong; later increases require the existing
-position to be working after costs. Only one ladder rung can be added per
-decision cycle.
-
-The new 8-12 week record uses `perp_trades_ledger_v47.csv`; the older
-`perp_trades_ledger.csv` remains a pre-inception archive. After deployment,
-start the baseline only while the verified exchange position is flat:
-
-`/api/reset_clean_book?confirm=START_NEW_TRACK_RECORD&amount=2000`
-
-This sets the tracking start timestamp and $2,000 baseline without deleting
-the historical ledgers. Freeze strategy parameters during the measurement
-window; permit only versioned bug, execution-safety, or data-integrity fixes.
