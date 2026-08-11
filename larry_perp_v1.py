@@ -557,7 +557,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v45_control_integrity")
+log = logging.getLogger("larry_perp_v46_independent_legs")
 
 # =============================================================================
 # UTILITIES
@@ -5141,7 +5141,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v45_control_integrity",
+        "version": "larry_perp_v46_independent_legs",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
