@@ -4004,7 +4004,7 @@ function renderPortfolio(po){
  set('portSpotBtc',`${num(po.spot_btc,8)} BTC`); set('portPerpBtc',`${po.exchange_side||'FLAT'} ${Math.abs(po.abs_contracts||0)} micro contracts / ${num(po.perp_btc,4)} BTC notional`); set('portExchange',`${po.exchange_side||'—'} ${Math.abs(po.net_contracts||0)} contracts @ avg ${po.exchange_avg_entry?usd(po.exchange_avg_entry):'—'}`); set('portSummary',po.summary||'—');
 }
 function renderPositionLegs(d){
- const es=d.engine_state||{}, cfg=d.config||{}, book=es.position_legs||{}, legs=(book.legs||[]).filter(x=>x&&x.status==='OPEN'&&Number(x.remaining_contracts||0)>0);
+ const es=d.engine_state||{}, cfg=es.active_strategy_config||d.config||{}, book=es.position_legs||{}, legs=(book.legs||[]).filter(x=>x&&x.status==='OPEN'&&Number(x.remaining_contracts||0)>0);
  const grid=$('positionLegGrid'), summary=$('legSummary'); if(!grid||!summary)return;
  const legSection=grid.closest('section'), advanced=document.querySelector('details.advanced-diagnostics');
  if(legSection&&advanced&&advanced.contains(legSection)){advanced.parentNode.insertBefore(legSection,advanced)}
