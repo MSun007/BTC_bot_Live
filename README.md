@@ -437,6 +437,34 @@ After each material strategy change, update this README, configuration notes, te
 
 ## Current production release
 
+### v46 independent position legs — August 10, 2026
+
+Larry now keeps an internal lot-level risk book even though Coinbase exposes one
+netted futures position. An existing live position is migrated once as the CORE
+leg using the exchange average and the locked ATR already present in engine state.
+Every later ADD receives its own immutable entry, ATR, 1.5x ATR firm stop, TP1,
+TSL activation/high-water mark, remaining quantity, fees and realized/open P&L.
+
+New-risk rules are deliberately tighter:
+
+- a new core entry requires a fresh 4/4 closed-candle confirmation;
+- initial entries are capped at four contracts;
+- at most one two-contract add is permitted;
+- an add requires a fresh same-side 4/4 setup, maintained-or-better conviction,
+  and at least 0.16% favorable progress from the existing leg anchors;
+- adverse phantom-extension pyramiding is disabled;
+- TP1 is 1.25R and the leg TSL arms at 1.0R while the firm stop remains 1.5x ATR;
+- internal signed leg quantity must equal Coinbase signed quantity or all new
+  entries/adds fail closed while protective monitoring remains visible.
+
+The dashboard includes a responsive Independent Position Legs panel and displays
+the dashboard/engine version and deployment date. The durable per-leg audit log is
+`gs://btc_trade_log/perp_position_legs_ledger.csv`.
+
+The exchange remains the authority for total contracts and fills. Internal legs
+are Larry's risk/accounting allocation and must always reconcile to that net total.
+
+
 The v44 release adds structured trade-decision observability and bounded,
 fail-closed Coinbase read resilience without changing Larry's strategy
 thresholds, sizing, stops, profit targets or ownership rules. The dashboard now

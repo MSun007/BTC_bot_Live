@@ -273,9 +273,18 @@ MACRO_BLOCKED_PROBE_CONTRACTS = int(os.getenv("MACRO_BLOCKED_PROBE_CONTRACTS", s
 PROGRESSIVE_ADD_ONS_ENABLED = os.getenv("PROGRESSIVE_ADD_ONS_ENABLED", "true").lower() in ("1", "true", "yes")
 MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = int(os.getenv("MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD", "10"))
 MAX_POSITION_ADDS = int(os.getenv("MAX_POSITION_ADDS", "3"))
-EXPECTED_CONFIG_VERSION = "v45_control_integrity"
+ENTRY_MIN_SCORE = int(os.getenv("ENTRY_MIN_SCORE", "4"))
+ADD_MIN_SCORE = int(os.getenv("ADD_MIN_SCORE", "4"))
+ADD_REQUIRE_PROFITABLE = os.getenv("ADD_REQUIRE_PROFITABLE", "true").lower() in ("1", "true", "yes")
+ADD_MIN_FAVORABLE_PCT = float(os.getenv("ADD_MIN_FAVORABLE_PCT", "0.0016"))
+POSITION_LEGS_ENABLED = os.getenv("POSITION_LEGS_ENABLED", "true").lower() in ("1", "true", "yes")
+LEG_TSL_ACTIVATION_R = float(os.getenv("LEG_TSL_ACTIVATION_R", "1.0"))
+LEG_TP1_R_MULTIPLE = float(os.getenv("LEG_TP1_R_MULTIPLE", "1.25"))
+INITIAL_ENTRY_MAX_CONTRACTS = int(os.getenv("INITIAL_ENTRY_MAX_CONTRACTS", "4"))
+ADD_MAX_CONTRACTS = int(os.getenv("ADD_MAX_CONTRACTS", "2"))
+EXPECTED_CONFIG_VERSION = "v46_independent_legs"
 # Filled from the canonical strategy_config.json after release construction.
-EXPECTED_CONFIG_SHA256 = "d9d1c8a61512a15760032325c019a0c9228d4677ba71c6d8c9bf5177e74f2d91"
+EXPECTED_CONFIG_SHA256 = "bcfc079be052b449ed69c244d77d37591f7937c7d9c70802fc56fd2e65478f2f"
 DAILY_NET_LOSS_LIMIT_USD = float(os.getenv("DAILY_NET_LOSS_LIMIT_USD", "25"))
 COUNTERTREND_ENTRIES_ENABLED = os.getenv("COUNTERTREND_ENTRIES_ENABLED", "false").lower() in ("1", "true", "yes")
 NEUTRAL_REGIME_MAX_CONTRACTS = int(os.getenv("NEUTRAL_REGIME_MAX_CONTRACTS", str(CONTRACTS_PER_TRADE_PROBE)))
@@ -419,6 +428,7 @@ UNIFIED_HEARTBEAT_BLOB = "coinbase_unified_heartbeat.json"
 LEGACY_HEARTBEAT_BLOB = "perp_heartbeat.json"
 PERP_POSITION_STATE_BLOB = "perp_position_state.json"
 PERP_TRADES_LEDGER_BLOB = "perp_trades_ledger.csv"
+PERP_LEG_LEDGER_BLOB = "perp_position_legs_ledger.csv"
 SPOT_POSITION_STATE_BLOB = "coinbase_spot_position_state.json"
 SPOT_TRADES_LEDGER_BLOB = "coinbase_spot_trades_ledger.csv"
 MANUAL_POSITION_EVENTS_BLOB = "manual_position_events.csv"
@@ -430,7 +440,7 @@ EMERGENCY_FLATTEN_REQUEST_BLOB = "emergency_flatten_request.json"  # v29 dashboa
 
 DEFAULT_STRATEGY_CONFIG = {
     "CONFIG_VERSION": EXPECTED_CONFIG_VERSION,
-    "CONFIG_NOTE": "v45: fail-closed config integrity, strict score commitment, monotonic entry sizing, directional macro gating, distinct-candle adaptive defence, and fee-complete risk accounting.",
+    "CONFIG_NOTE": "v46: 4/4 cost-aware entries, strength-only pyramiding, independent core/add legs, and per-leg ATR/TP/TSL accounting.",
     "CONTRACT_SIZE_BTC": CONTRACT_SIZE_BTC,
     "MAX_CONVICTION_CONTRACTS": MAX_CONVICTION_CONTRACTS,
     "PROBE_PCT": PROBE_PCT,
@@ -445,6 +455,15 @@ DEFAULT_STRATEGY_CONFIG = {
     "PROGRESSIVE_ADD_ONS_ENABLED": PROGRESSIVE_ADD_ONS_ENABLED,
     "MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD": MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD,
     "MAX_POSITION_ADDS": MAX_POSITION_ADDS,
+    "ENTRY_MIN_SCORE": ENTRY_MIN_SCORE,
+    "ADD_MIN_SCORE": ADD_MIN_SCORE,
+    "ADD_REQUIRE_PROFITABLE": ADD_REQUIRE_PROFITABLE,
+    "ADD_MIN_FAVORABLE_PCT": ADD_MIN_FAVORABLE_PCT,
+    "POSITION_LEGS_ENABLED": POSITION_LEGS_ENABLED,
+    "LEG_TSL_ACTIVATION_R": LEG_TSL_ACTIVATION_R,
+    "LEG_TP1_R_MULTIPLE": LEG_TP1_R_MULTIPLE,
+    "INITIAL_ENTRY_MAX_CONTRACTS": INITIAL_ENTRY_MAX_CONTRACTS,
+    "ADD_MAX_CONTRACTS": ADD_MAX_CONTRACTS,
     "DAILY_NET_LOSS_LIMIT_USD": DAILY_NET_LOSS_LIMIT_USD,
     "COUNTERTREND_ENTRIES_ENABLED": COUNTERTREND_ENTRIES_ENABLED,
     "NEUTRAL_REGIME_MAX_CONTRACTS": NEUTRAL_REGIME_MAX_CONTRACTS,
@@ -934,6 +953,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "PROBE_PCT", "PARTIAL_PCT", "STRONG_PCT",
         "REVERSAL_NEAR_BB_PCT", "REVERSAL_RSI_SOFT_LONG_MAX", "REVERSAL_RSI_SOFT_SHORT_MIN",
         "MIN_FUTURES_EQUITY_BUFFER_USD", "ADAPTIVE_ENTRY_GRACE_MINUTES", "ADAPTIVE_MIN_ADVERSE_ATR", "DAILY_NET_LOSS_LIMIT_USD",
+        "ADD_MIN_FAVORABLE_PCT", "LEG_TSL_ACTIVATION_R", "LEG_TP1_R_MULTIPLE",
         "MAX_EFFECTIVE_LEVERAGE", "RSI_LONG_MAX", "RSI_SHORT_MIN",
         "STOCH_LONG_MAX", "STOCH_SHORT_MIN", "VOL_SPIKE_MIN", "SPOT_MIN_ORDER_USD",
     ]
@@ -951,12 +971,13 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "ADAPTIVE_REDUCE_SCORE", "ADAPTIVE_EXIT_SCORE", "ADAPTIVE_CONFIRM_CYCLES", "ADAPTIVE_REENTRY_COOLDOWN_MINUTES",
         "SWING_PIVOT_LEFT_BARS", "SWING_PIVOT_RIGHT_BARS",
         "NEUTRAL_REGIME_MAX_CONTRACTS",
+        "ENTRY_MIN_SCORE", "ADD_MIN_SCORE", "MAX_POSITION_ADDS", "INITIAL_ENTRY_MAX_CONTRACTS", "ADD_MAX_CONTRACTS",
     ]
     # STREAK_PAUSE_MINUTES is normalized for display only; apply_strategy_config always
     # derives the effective pause length from STREAK_PAUSE_HOURS (single source of truth,
     # see v30 fix note there) so editing only the hours field on the dashboard takes effect.
     float_keys += ["STREAK_PAUSE_HOURS", "STREAK_PAUSE_MINUTES"]
-    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED"]
+    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED", "ADD_REQUIRE_PROFITABLE", "POSITION_LEGS_ENABLED"]
     for k in float_keys:
         cfg[k] = safe_float(cfg.get(k), safe_float(DEFAULT_STRATEGY_CONFIG.get(k), 0.0))
     for k in int_keys:
@@ -994,7 +1015,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     This keeps the current file structure stable while making parameters live
     configurable. Product IDs and exchange plumbing remain code/env controlled.
     """
-    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
+    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, ENTRY_MIN_SCORE, ADD_MIN_SCORE, ADD_REQUIRE_PROFITABLE, ADD_MIN_FAVORABLE_PCT, POSITION_LEGS_ENABLED, LEG_TSL_ACTIVATION_R, LEG_TP1_R_MULTIPLE, INITIAL_ENTRY_MAX_CONTRACTS, ADD_MAX_CONTRACTS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
     global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_ENTRY_GRACE_MINUTES, ADAPTIVE_MIN_ADVERSE_ATR, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES, DAILY_NET_LOSS_LIMIT_USD
@@ -1024,6 +1045,15 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     MACRO_BLOCKED_PROBE_CONTRACTS = safe_int(cfg.get("MACRO_BLOCKED_PROBE_CONTRACTS"), CONTRACTS_PER_TRADE_PROBE)
     MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = safe_int(cfg.get("MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD"), MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD)
     MAX_POSITION_ADDS = safe_int(cfg.get("MAX_POSITION_ADDS"), MAX_POSITION_ADDS)
+    ENTRY_MIN_SCORE = max(1, min(4, safe_int(cfg.get("ENTRY_MIN_SCORE"), ENTRY_MIN_SCORE)))
+    ADD_MIN_SCORE = max(ENTRY_MIN_SCORE, min(4, safe_int(cfg.get("ADD_MIN_SCORE"), ADD_MIN_SCORE)))
+    ADD_REQUIRE_PROFITABLE = _bool_from_any(cfg.get("ADD_REQUIRE_PROFITABLE"), ADD_REQUIRE_PROFITABLE)
+    ADD_MIN_FAVORABLE_PCT = max(0.0, safe_float(cfg.get("ADD_MIN_FAVORABLE_PCT"), ADD_MIN_FAVORABLE_PCT))
+    POSITION_LEGS_ENABLED = _bool_from_any(cfg.get("POSITION_LEGS_ENABLED"), POSITION_LEGS_ENABLED)
+    LEG_TSL_ACTIVATION_R = max(0.25, safe_float(cfg.get("LEG_TSL_ACTIVATION_R"), LEG_TSL_ACTIVATION_R))
+    LEG_TP1_R_MULTIPLE = max(0.5, safe_float(cfg.get("LEG_TP1_R_MULTIPLE"), LEG_TP1_R_MULTIPLE))
+    INITIAL_ENTRY_MAX_CONTRACTS = max(1, safe_int(cfg.get("INITIAL_ENTRY_MAX_CONTRACTS"), INITIAL_ENTRY_MAX_CONTRACTS))
+    ADD_MAX_CONTRACTS = max(1, safe_int(cfg.get("ADD_MAX_CONTRACTS"), ADD_MAX_CONTRACTS))
     DAILY_NET_LOSS_LIMIT_USD = max(0.0, safe_float(cfg.get("DAILY_NET_LOSS_LIMIT_USD"), DAILY_NET_LOSS_LIMIT_USD))
     COUNTERTREND_ENTRIES_ENABLED = _bool_from_any(cfg.get("COUNTERTREND_ENTRIES_ENABLED"), COUNTERTREND_ENTRIES_ENABLED)
     NEUTRAL_REGIME_MAX_CONTRACTS = max(1, safe_int(cfg.get("NEUTRAL_REGIME_MAX_CONTRACTS"), NEUTRAL_REGIME_MAX_CONTRACTS))
@@ -1482,7 +1512,12 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v45_control_integrity",
+        "version": "larry_perp_v46_independent_legs",
+        "deployment": {
+            "version": "v46",
+            "deployed_at": "2026-08-10",
+            "release": "independent_position_legs",
+        },
         "phantom": {
             "state": "MONITORING",
             "direction": None,
@@ -1566,6 +1601,17 @@ def default_engine_state() -> Dict[str, Any]:
         "last_order_plan": None,
         "last_exchange_position": None,
         "bot_managed_position": None,
+        "position_legs": {
+            "schema_version": 1,
+            "enabled": POSITION_LEGS_ENABLED,
+            "legs": [],
+            "exchange_signed_contracts": 0,
+            "internal_signed_contracts": 0,
+            "reconciled": True,
+            "entry_adds_allowed": True,
+            "last_reconciled_at": None,
+            "migration": None,
+        },
         "manual_position_status": {
             "mode": MANUAL_POSITION_MODE,
             "is_manual_or_external": False,
@@ -3327,6 +3373,188 @@ def update_stop_blown_shadow(state: Dict[str, Any], price: float, atr_now: float
                "updated_at": iso_utc(), "mode": "SHADOW", "trading_action": "NONE"})
 
 
+def _new_position_leg(kind: str, side: str, contracts: int, entry_price: float,
+                      atr_at_entry: float, score: int = 0, confidence_pct: int = 0,
+                      source: str = "BOT_FILL") -> Dict[str, Any]:
+    """Create an internal risk lot. Coinbase remains netted; Larry does not."""
+    qty = max(0, safe_int(contracts, 0))
+    entry = safe_float(entry_price, 0.0)
+    atr = safe_float(atr_at_entry, 0.0)
+    direction = str(side or "").upper()
+    risk_distance = atr * ATR_MULTIPLIER
+    long_side = direction == "LONG"
+    return {
+        "leg_id": f"{kind.lower()}-{uuid.uuid4().hex[:10]}",
+        "kind": kind.upper(), "side": direction,
+        "original_contracts": qty, "remaining_contracts": qty,
+        "entry_price": entry, "atr_at_entry": atr,
+        "firm_stop": entry - risk_distance if long_side else entry + risk_distance,
+        "tp1_trigger": entry + risk_distance * LEG_TP1_R_MULTIPLE if long_side else entry - risk_distance * LEG_TP1_R_MULTIPLE,
+        "tsl_activation": entry + risk_distance * LEG_TSL_ACTIVATION_R if long_side else entry - risk_distance * LEG_TSL_ACTIVATION_R,
+        "tsl_active": False, "tsl_stop": None,
+        "highest_price": entry if long_side else None,
+        "lowest_price": entry if not long_side else None,
+        "tp1_done": False, "status": "OPEN",
+        "entry_score": safe_int(score, 0), "entry_confidence_pct": safe_int(confidence_pct, 0),
+        "source": source, "opened_at": iso_utc(), "updated_at": iso_utc(),
+        "realized_gross_pnl_usd": 0.0, "allocated_fees_usd": 0.0,
+    }
+
+
+def ensure_position_legs(state: Dict[str, Any], live_pos: Dict[str, Any], sig: SignalSnapshot) -> Dict[str, Any]:
+    """Migrate/reconcile the internal leg book without resetting live protection."""
+    book = state.setdefault("position_legs", default_engine_state()["position_legs"])
+    book["enabled"] = POSITION_LEGS_ENABLED
+    signed = safe_int(live_pos.get("signed_contracts"), 0)
+    if signed == 0:
+        book.update({"legs": [], "exchange_signed_contracts": 0, "internal_signed_contracts": 0,
+                     "reconciled": True, "entry_adds_allowed": True, "last_reconciled_at": iso_utc()})
+        return book
+    side = "LONG" if signed > 0 else "SHORT"
+    open_legs = [leg for leg in (book.get("legs") or []) if leg.get("status") == "OPEN" and safe_int(leg.get("remaining_contracts"), 0) > 0]
+    if not open_legs:
+        controls = state.get("position_controls") or {}
+        atr = safe_float(controls.get("atr_at_entry"), 0.0) or safe_float(sig.atr, 0.0)
+        avg = safe_float(controls.get("atr_entry_avg"), 0.0) or safe_float(live_pos.get("avg_entry_price"), 0.0)
+        leg = _new_position_leg("CORE", side, abs(signed), avg, atr,
+                                score=safe_int((state.get("last_core_sizing_decision") or {}).get("score"), 0),
+                                confidence_pct=safe_int((state.get("add_on_state") or {}).get("last_add_confidence_pct"), 0),
+                                source="V46_LIVE_POSITION_MIGRATION")
+        leg["migration_note"] = "Existing Coinbase position adopted as the protected core leg; exchange average and locked ATR retained where available."
+        book["legs"] = [leg]
+        book["migration"] = {"at": iso_utc(), "signed_contracts": signed, "avg_entry_price": avg,
+                             "atr_at_entry": atr, "status": "MIGRATED_AS_CORE"}
+        open_legs = [leg]
+    internal_signed = sum((1 if str(leg.get("side")).upper() == "LONG" else -1) * safe_int(leg.get("remaining_contracts"), 0) for leg in open_legs)
+    reconciled = internal_signed == signed and all(str(leg.get("side")).upper() == side for leg in open_legs)
+    book.update({"exchange_signed_contracts": signed, "internal_signed_contracts": internal_signed,
+                 "reconciled": reconciled, "entry_adds_allowed": reconciled,
+                 "reconciliation_status": "MATCH" if reconciled else "DRIFT_BLOCK_NEW_RISK",
+                 "last_reconciled_at": iso_utc()})
+    return book
+
+
+def update_position_leg_controls(state: Dict[str, Any], live_pos: Dict[str, Any], sig: SignalSnapshot) -> Dict[str, Any]:
+    book = ensure_position_legs(state, live_pos, sig)
+    price = safe_float(sig.price, 0.0) or safe_float(live_pos.get("current_price"), 0.0)
+    for leg in book.get("legs") or []:
+        if leg.get("status") != "OPEN" or safe_int(leg.get("remaining_contracts"), 0) <= 0:
+            continue
+        entry = safe_float(leg.get("entry_price"), 0.0)
+        side = str(leg.get("side") or "").upper()
+        if side == "LONG":
+            leg["highest_price"] = max(safe_float(leg.get("highest_price"), entry), price)
+            if not leg.get("tsl_active") and price >= safe_float(leg.get("tsl_activation"), float("inf")):
+                leg["tsl_active"] = True
+            if leg.get("tsl_active"):
+                leg["tsl_stop"] = safe_float(leg.get("highest_price"), price) * (1 - TSL_TRAIL_PCT)
+            leg["unrealized_pnl_usd"] = (price - entry) * CONTRACT_SIZE_BTC * safe_int(leg.get("remaining_contracts"), 0)
+        else:
+            prior_low = safe_float(leg.get("lowest_price"), entry) or entry
+            leg["lowest_price"] = min(prior_low, price)
+            if not leg.get("tsl_active") and price <= safe_float(leg.get("tsl_activation"), -float("inf")):
+                leg["tsl_active"] = True
+            if leg.get("tsl_active"):
+                leg["tsl_stop"] = safe_float(leg.get("lowest_price"), price) * (1 + TSL_TRAIL_PCT)
+            leg["unrealized_pnl_usd"] = (entry - price) * CONTRACT_SIZE_BTC * safe_int(leg.get("remaining_contracts"), 0)
+        leg["updated_at"] = iso_utc()
+    return book
+
+
+def position_leg_exit_if_needed(state: Dict[str, Any], live_pos: Dict[str, Any], price: float) -> Tuple[Optional[int], Optional[str], Optional[Dict[str, Any]]]:
+    """Choose one independently protected leg action, with firm stops first."""
+    signed = safe_int(live_pos.get("signed_contracts"), 0)
+    book = state.get("position_legs") or {}
+    if not POSITION_LEGS_ENABLED or signed == 0 or not book.get("reconciled"):
+        return None, None, None
+    candidates = []
+    for leg in book.get("legs") or []:
+        qty = safe_int(leg.get("remaining_contracts"), 0)
+        if leg.get("status") != "OPEN" or qty <= 0:
+            continue
+        side = str(leg.get("side") or "").upper()
+        hard = price <= safe_float(leg.get("firm_stop"), -float("inf")) if side == "LONG" else price >= safe_float(leg.get("firm_stop"), float("inf"))
+        tsl = bool(leg.get("tsl_active")) and (price <= safe_float(leg.get("tsl_stop"), -float("inf")) if side == "LONG" else price >= safe_float(leg.get("tsl_stop"), float("inf")))
+        tp = (not leg.get("tp1_done")) and (price >= safe_float(leg.get("tp1_trigger"), float("inf")) if side == "LONG" else price <= safe_float(leg.get("tp1_trigger"), -float("inf")))
+        if hard: candidates.append((0, leg, qty, "ATR_STOP"))
+        elif tsl: candidates.append((1, leg, qty, "TSL_STOP"))
+        elif tp:
+            close_qty = max(1, int(math.ceil(qty / 2.0))) if qty > 1 else qty
+            candidates.append((2, leg, close_qty, "TP1_PARTIAL"))
+    if not candidates:
+        return None, None, None
+    _, leg, close_qty, trigger = sorted(candidates, key=lambda row: (row[0], row[1].get("opened_at") or ""))[0]
+    target = signed - close_qty if signed > 0 else signed + close_qty
+    reason = f"LEG_{trigger}_{leg.get('side')}_{leg.get('leg_id')}"
+    action = {"leg_id": leg.get("leg_id"), "close_qty": close_qty, "trigger": trigger,
+              "target_signed": target, "reason": reason}
+    return target, reason, action
+
+
+def record_position_leg_execution(gcs: GCS, state: Dict[str, Any], result: Dict[str, Any],
+                                  reason: str, sig: Optional[SignalSnapshot] = None,
+                                  decision: Optional[Dict[str, Any]] = None) -> None:
+    """Allocate confirmed fills/fees to the internal leg ledger."""
+    if not POSITION_LEGS_ENABLED or not result or not result.get("ok"):
+        return
+    before, after = result.get("before") or {}, result.get("after") or {}
+    b, a = safe_int(before.get("signed_contracts"), 0), safe_int(after.get("signed_contracts"), 0)
+    if b == a:
+        return
+    book = state.setdefault("position_legs", default_engine_state()["position_legs"])
+    fill = safe_float((result.get("fills") or {}).get("avg_price"), 0.0) or safe_float(after.get("avg_entry_price"), 0.0)
+    fees = safe_float(result.get("fees_usd"), safe_float((result.get("fills") or {}).get("commission"), 0.0))
+    action = _CYCLE_CONTEXT.get("active_leg_action") or {}
+    event_leg_id = action.get("leg_id")
+    if b and a and (b > 0) != (a > 0):
+        close_fee = fees * abs(b) / max(1, abs(b) + abs(a))
+        for leg in [x for x in book.get("legs") or [] if x.get("status") == "OPEN"]:
+            close_qty = safe_int(leg.get("remaining_contracts"), 0)
+            entry = safe_float(leg.get("entry_price"), fill)
+            gross = ((fill - entry) if str(leg.get("side")).upper() == "LONG" else (entry - fill)) * CONTRACT_SIZE_BTC * close_qty
+            leg["realized_gross_pnl_usd"] = safe_float(leg.get("realized_gross_pnl_usd"), 0.0) + gross
+            leg["allocated_fees_usd"] = safe_float(leg.get("allocated_fees_usd"), 0.0) + close_fee * close_qty / max(1, abs(b))
+            leg["remaining_contracts"] = 0; leg["status"] = "CLOSED"; leg["closed_at"] = iso_utc()
+        score = safe_int((decision or {}).get("score"), safe_int((_CYCLE_CONTEXT.get("decision_context") or {}).get("active_score"), 0))
+        confidence = safe_int((decision or {}).get("confidence_pct"), 0)
+        leg = _new_position_leg("CORE", "LONG" if a > 0 else "SHORT", abs(a), fill,
+                                safe_float((sig.atr if sig else 0.0), 0.0), score, confidence, reason)
+        leg["allocated_fees_usd"] = fees - close_fee
+        book.setdefault("legs", []).append(leg); event_leg_id = leg["leg_id"]
+    elif abs(a) > abs(b) and (b == 0 or (a > 0) == (b > 0)):
+        qty = abs(a) - abs(b)
+        kind = "CORE" if b == 0 else "ADD"
+        score = safe_int((decision or {}).get("score"), safe_int(_CYCLE_CONTEXT.get("decision_context", {}).get("active_score"), 0))
+        confidence = safe_int((decision or {}).get("confidence_pct"), 0)
+        leg = _new_position_leg(kind, "LONG" if a > 0 else "SHORT", qty, fill,
+                                safe_float((sig.atr if sig else 0.0), 0.0), score, confidence, reason)
+        leg["allocated_fees_usd"] = fees
+        book.setdefault("legs", []).append(leg)
+        event_leg_id = leg["leg_id"]
+    elif abs(a) < abs(b) and b and (a == 0 or (a > 0) == (b > 0)):
+        remaining = abs(b) - abs(a)
+        ordered = sorted([leg for leg in book.get("legs") or [] if leg.get("status") == "OPEN"],
+                         key=lambda leg: (0 if leg.get("leg_id") == event_leg_id else 1, leg.get("opened_at") or ""))
+        for leg in ordered:
+            if remaining <= 0: break
+            close_qty = min(remaining, safe_int(leg.get("remaining_contracts"), 0))
+            if close_qty <= 0: continue
+            entry = safe_float(leg.get("entry_price"), fill)
+            gross = ((fill - entry) if str(leg.get("side")).upper() == "LONG" else (entry - fill)) * CONTRACT_SIZE_BTC * close_qty
+            leg["remaining_contracts"] = safe_int(leg.get("remaining_contracts"), 0) - close_qty
+            leg["realized_gross_pnl_usd"] = safe_float(leg.get("realized_gross_pnl_usd"), 0.0) + gross
+            leg["allocated_fees_usd"] = safe_float(leg.get("allocated_fees_usd"), 0.0) + fees * close_qty / max(1, abs(b) - abs(a))
+            if action.get("trigger") == "TP1_PARTIAL": leg["tp1_done"] = True
+            if leg["remaining_contracts"] <= 0:
+                leg["status"] = "CLOSED"; leg["closed_at"] = iso_utc()
+            leg["updated_at"] = iso_utc(); remaining -= close_qty; event_leg_id = leg.get("leg_id")
+    book["last_execution"] = {"at": iso_utc(), "reason": reason, "leg_id": event_leg_id,
+                              "before_signed": b, "after_signed": a, "fill_price": fill, "fees_usd": fees}
+    header = ["timestamp","leg_id","reason","before_signed","after_signed","fill_price","fees_usd"]
+    gcs.append_csv_row(PERP_LEG_LEDGER_BLOB, header, [iso_utc(),event_leg_id,reason,b,a,fill,fees])
+    _CYCLE_CONTEXT["active_leg_action"] = None
+
+
 def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any], sig: SignalSnapshot,
                                   candles: Optional[List[Dict[str, float]]] = None) -> Dict[str, Any]:
     controls = state.setdefault("position_controls", default_engine_state()["position_controls"])
@@ -3349,6 +3577,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
             "adaptive_entry_at": None, "adaptive_entry_price": None, "adaptive_entry_baseline": None,
             "adaptive_defense": {"enabled": ADAPTIVE_DEFENSE_ENABLED, "score": 0, "state": "FLAT", "evidence": []},
         })
+        update_position_leg_controls(state, live_pos, sig)
         return controls
 
     # v12: lock ATR at entry. The "entry" is defined as the first cycle the bot
@@ -3428,6 +3657,7 @@ def update_position_risk_controls(state: Dict[str, Any], live_pos: Dict[str, Any
             controls["tsl_position_version"] = controls.get("position_version")
         if controls.get("tsl_active"):
             controls["tsl_stop"] = low * (1 + TSL_TRAIL_PCT)
+    update_position_leg_controls(state, live_pos, sig)
     return controls
 
 
@@ -4398,14 +4628,35 @@ def should_allow_progressive_add(state: Dict[str, Any], current_signed: int, tar
     # Not an add; allow reductions/flips produced by target-net logic.
     if abs(target_signed) <= abs(current_signed) or (current_signed and (target_signed * current_signed) < 0):
         return True, "not_an_add_or_is_flip"
+    book = state.get("position_legs") or {}
+    if POSITION_LEGS_ENABLED and not book.get("reconciled", False):
+        return False, "position_leg_reconciliation_drift_blocks_new_risk"
+    active_score = safe_int(
+        decision.get("score"),
+        safe_int((_CYCLE_CONTEXT.get("decision_context") or {}).get("active_score"), 0),
+    )
+    open_legs = [leg for leg in (book.get("legs") or []) if leg.get("status") == "OPEN"]
+    core_score = max([safe_int(leg.get("entry_score"), 0) for leg in open_legs] or [0])
+    if active_score < max(ADD_MIN_SCORE, core_score):
+        return False, f"add_conviction_not_maintained_score_{active_score}_required_{max(ADD_MIN_SCORE, core_score)}"
+    current_price = safe_float((_CYCLE_CONTEXT.get("decision_context") or {}).get("price"), 0.0)
+    core_entries = [safe_float(leg.get("entry_price"), 0.0) for leg in open_legs if safe_float(leg.get("entry_price"), 0.0) > 0]
+    core_anchor = sum(core_entries) / len(core_entries) if core_entries else 0.0
+    favorable_pct = 0.0
+    if core_anchor and current_price:
+        favorable_pct = (current_price / core_anchor - 1.0) if current_signed > 0 else (core_anchor / current_price - 1.0)
+    decision["add_favorable_pct"] = favorable_pct
+    decision["add_cost_hurdle_pct"] = ADD_MIN_FAVORABLE_PCT
+    if ADD_REQUIRE_PROFITABLE and favorable_pct < ADD_MIN_FAVORABLE_PCT:
+        return False, f"add_requires_working_position_{favorable_pct:.4%}_below_{ADD_MIN_FAVORABLE_PCT:.4%}"
     add_state = state.setdefault("add_on_state", default_engine_state().get("add_on_state", {}))
     confidence = safe_int(decision.get("confidence_pct"), 0)
     last_conf = safe_int(add_state.get("last_add_confidence_pct"), 0)
     adds_count = safe_int(add_state.get("adds_count"), 0)
     if adds_count >= MAX_POSITION_ADDS:
         return False, f"max_position_adds_reached_{adds_count}/{MAX_POSITION_ADDS}"
-    if last_conf and confidence < last_conf + MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD:
-        return False, f"confidence_improvement_too_small_{confidence}%_vs_last_{last_conf}%"
+    if last_conf and confidence < last_conf:
+        return False, f"add_confidence_weaker_{confidence}%_vs_existing_{last_conf}%"
     return True, "progressive_add_allowed"
 
 
@@ -5098,7 +5349,29 @@ def run_once(cb: Any, gcs: GCS) -> None:
     }
     exit_target, exit_reason = (None, None)
     if mgmt.get("allow_bot_to_trade_position"):
-        exit_target, exit_reason = risk_exit_target_if_needed(live_pos, controls, sig.price)
+        leg_target, leg_reason, leg_action = position_leg_exit_if_needed(state, live_pos, sig.price)
+        if leg_target is not None:
+            exit_target, exit_reason = leg_target, leg_reason
+            _CYCLE_CONTEXT["active_leg_action"] = leg_action
+        else:
+            # Adaptive defence remains position-wide. ATR/TP/TSL are owned by
+            # independent v46 legs and must never be re-anchored to Coinbase's blend.
+            legacy_target, legacy_reason = risk_exit_target_if_needed(live_pos, controls, sig.price)
+            legs_reconciled = bool((state.get("position_legs") or {}).get("reconciled"))
+            if legacy_reason and (legacy_reason.startswith(("ADAPTIVE_DEFENSE_",)) or not legs_reconciled):
+                exit_target, exit_reason = legacy_target, legacy_reason
+                if legacy_reason.startswith("ADAPTIVE_DEFENSE_REDUCE_"):
+                    open_legs = [leg for leg in ((state.get("position_legs") or {}).get("legs") or [])
+                                 if leg.get("status") == "OPEN" and safe_int(leg.get("remaining_contracts"), 0) > 0]
+                    preferred = sorted(open_legs, key=lambda leg: (0 if leg.get("kind") == "ADD" else 1,
+                                                                   str(leg.get("opened_at") or "")), reverse=False)
+                    if preferred:
+                        close_qty = max(0, abs(safe_int(live_pos.get("signed_contracts"), 0)) - abs(safe_int(legacy_target, 0)))
+                        _CYCLE_CONTEXT["active_leg_action"] = {
+                            "leg_id": preferred[0].get("leg_id"), "close_qty": close_qty,
+                            "trigger": "ADAPTIVE_DEFENSE", "target_signed": legacy_target,
+                            "reason": legacy_reason,
+                        }
     elif safe_int(live_pos.get("signed_contracts"), 0) != 0:
         state.setdefault("last_blocked_action", {})["manual_position"] = (
             "Manual/external perp position is monitor-only; ATR/TSL exits are disabled."
@@ -5147,6 +5420,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
                 # keep counting toward LOSS_STREAK_LIMIT.
                 state.setdefault("risk", {})["loss_streak"] = 0
             record_trade_risk_result(state, last_result, exit_reason or "RISK_EXIT")
+            record_position_leg_execution(gcs, state, last_result, exit_reason or "RISK_EXIT", sig)
             if after_signed == 0 and ("STOP" in (exit_reason or "") or "ADAPTIVE_DEFENSE_EXIT" in (exit_reason or "")):
                 previous_sb = state.get("stop_blown") or {}
                 history = state.setdefault("stop_blown_history", [])
@@ -5202,7 +5476,12 @@ def run_once(cb: Any, gcs: GCS) -> None:
             ext_target_price = safe_float(pc.get("phantom_extension_target_price"), 0.0)
             ext_target_contracts = safe_int(pc.get("phantom_extension_target_contracts"), 0)
             ext_done = bool(pc.get("phantom_extension_add_done"))
-            side_ok = (live_signed_for_ext > 0 and sig.price <= ext_target_price) or (live_signed_for_ext < 0 and sig.price >= ext_target_price)
+            # v46: an adverse phantom extension is no longer an add trigger.
+            # Scaling is only permitted from a fresh same-side core confirmation
+            # after the existing leg has cleared the cost/profit hurdle.
+            side_ok = False
+            if live_signed_for_ext and ext_target_price > 0 and not ext_done:
+                state.setdefault("last_blocked_action", {})["perp_extension_add"] = "adverse_extension_add_disabled_v46_strength_only_scaling"
             if live_signed_for_ext != 0 and ext_target_price > 0 and ext_target_contracts > abs(live_signed_for_ext) and side_ok and not ext_done:
                 entries_allowed_ext, reason_ext = risk_allows_entry(state)
                 ext_side = "LONG" if live_signed_for_ext > 0 else "SHORT"
@@ -5249,6 +5528,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
                                 sync_bot_managed_position_after_trade(state, extension_add_result, "PHANTOM_EXTENSION_ADD_ON")
                                 record_progressive_add(state, extension_add_result, decision_ext)
                                 record_trade_risk_result(state, extension_add_result, "PHANTOM_EXTENSION_ADD_ON")
+                                record_position_leg_execution(gcs, state, extension_add_result, "PHANTOM_EXTENSION_ADD_ON", sig, decision_ext)
                         else:
                             state.setdefault("last_blocked_action", {})["perp_extension_add"] = guard_reason_ext
                 else:
@@ -5343,6 +5623,14 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             sizing_decision["target_abs_contracts"] = abs(target)
                             sizing_decision["final_contracts"] = abs(target)
                             sizing_decision["reason"] = "neutral_regime_probe_cap"
+                        current_for_cap = safe_int(live_now.get("signed_contracts"), 0)
+                        direction_sign = 1 if confirmed == "LONG" else -1
+                        if current_for_cap == 0:
+                            target = direction_sign * min(abs(target), INITIAL_ENTRY_MAX_CONTRACTS)
+                            sizing_decision["initial_entry_cap"] = INITIAL_ENTRY_MAX_CONTRACTS
+                        elif (current_for_cap > 0) == (direction_sign > 0) and abs(target) > abs(current_for_cap):
+                            target = direction_sign * min(abs(target), abs(current_for_cap) + ADD_MAX_CONTRACTS)
+                            sizing_decision["per_add_contract_cap"] = ADD_MAX_CONTRACTS
                         # v31: resize BEFORE building the plan / progressive-add check so
                         # everything downstream sees the leverage-capped target. A strong
                         # signal now executes at the largest safe size instead of being
@@ -5372,6 +5660,9 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         if not add_ok:
                             ok = False
                             guard_reason = add_reason
+                        if safe_int(live_now.get("signed_contracts"), 0) == 0 and _score < ENTRY_MIN_SCORE:
+                            ok = False
+                            guard_reason = f"entry_conviction_below_v46_minimum_{_score}/{ENTRY_MIN_SCORE}"
                         state["last_portfolio_guard"] = {"ok": ok, "reason": guard_reason, **guard}
                         _setup_id = (state.get("phantom") or {}).get("setup_id")
                         if ok:
@@ -5420,6 +5711,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
                                 sync_bot_managed_position_after_trade(state, last_result, core_reason)
                                 record_progressive_add(state, last_result, sizing_decision)
                                 record_trade_risk_result(state, last_result, core_reason)
+                                record_position_leg_execution(gcs, state, last_result, core_reason, sig, sizing_decision)
                                 if _guarded_reentry:
                                     resolve_adaptive_reentry_guard(state, confirmed, _setup_id)
                             state["phantom"] = default_engine_state()["phantom"]
@@ -5440,6 +5732,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
     live_pos_after = get_live_net_position(cb)
     _COINBASE_LAST_VERIFIED_POSITION_AT = iso_utc()
     _CYCLE_CONTEXT["last_verified_position_at"] = _COINBASE_LAST_VERIFIED_POSITION_AT
+    ensure_position_legs(state, live_pos_after, sig)
     if safe_int(live_pos_after.get("signed_contracts"), 0) == 0:
         state["position_controls"] = default_engine_state()["position_controls"]
         state["bot_managed_position"] = None

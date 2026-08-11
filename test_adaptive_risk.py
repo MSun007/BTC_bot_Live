@@ -107,7 +107,7 @@ class AdaptiveRiskTests(unittest.TestCase):
         self.assertEqual(state["add_on_state"]["last_add_confidence_pct"], 58)
         self.assertEqual(state["add_on_state"]["last_target_contracts"], 4)
 
-    def test_same_confidence_cannot_add_after_fresh_entry(self):
+    def test_same_confidence_can_add_only_when_position_is_working(self):
         state = larry.default_engine_state()
         larry.record_progressive_add(
             state,
@@ -115,11 +115,14 @@ class AdaptiveRiskTests(unittest.TestCase):
              "after": {"signed_contracts": 4, "side": "SHORT", "avg_entry_price": 100}},
             {"confidence_pct": 58},
         )
-        allowed, reason = larry.should_allow_progressive_add(
-            state, -4, -8, {"confidence_pct": 58}
+        state["position_legs"].update({"reconciled": True, "legs": [
+            larry._new_position_leg("CORE", "SHORT", 4, 100, 2, 4, 58)
+        ]})
+        larry._CYCLE_CONTEXT["decision_context"] = {"price": 99, "active_score": 4}
+        allowed, _ = larry.should_allow_progressive_add(
+            state, -4, -8, {"confidence_pct": 58, "score": 4}
         )
-        self.assertFalse(allowed)
-        self.assertIn("confidence_improvement", reason)
+        self.assertTrue(allowed)
 
     def test_same_side_increase_counts_as_one_add(self):
         state = larry.default_engine_state()
@@ -138,15 +141,19 @@ class AdaptiveRiskTests(unittest.TestCase):
             larry.MAX_POSITION_ADDS = 1
             larry.MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = 25
             state = larry.default_engine_state()
+            state["position_legs"].update({"reconciled": True, "legs": [
+                larry._new_position_leg("CORE", "LONG", 4, 100, 2, 4, 80)
+            ]})
+            larry._CYCLE_CONTEXT["decision_context"] = {"price": 101, "active_score": 4}
             allowed, _ = larry.should_allow_progressive_add(
-                state, 4, 8, {"confidence_pct": 92}
+                state, 4, 8, {"confidence_pct": 92, "score": 4}
             )
             self.assertTrue(allowed)
             state["add_on_state"].update(
                 {"adds_count": 1, "last_add_confidence_pct": 92}
             )
             allowed, reason = larry.should_allow_progressive_add(
-                state, 8, 14, {"confidence_pct": 100}
+                state, 8, 14, {"confidence_pct": 100, "score": 4}
             )
             self.assertFalse(allowed)
             self.assertIn("max_position_adds_reached", reason)
@@ -631,6 +638,46 @@ class AdaptiveRiskTests(unittest.TestCase):
         finally:
             larry.send_telegram_message = original_send
             larry.et_timestamp_short = original_timestamp
+
+
+class IndependentLegTests(unittest.TestCase):
+    def signal(self, price=65000, atr=300, long_score=4, short_score=0):
+        return larry.SignalSnapshot(price=price, rsi=25, stoch_rsi=.1, lower_bb=64900,
+            mid_bb=65200, upper_bb=65500, atr=atr, volume_ratio=1.5,
+            long_score=long_score, short_score=short_score,
+            long_conditions={}, short_conditions={})
+
+    def test_live_three_contracts_migrate_as_core_without_blended_reset(self):
+        state = larry.default_engine_state()
+        state["position_controls"]["atr_at_entry"] = 300
+        state["position_controls"]["atr_entry_avg"] = 64000
+        live = {"signed_contracts": 3, "side": "LONG", "avg_entry_price": 64000, "current_price": 65000}
+        book = larry.ensure_position_legs(state, live, self.signal())
+        self.assertTrue(book["reconciled"])
+        self.assertEqual(book["legs"][0]["kind"], "CORE")
+        self.assertEqual(book["legs"][0]["entry_price"], 64000)
+        self.assertEqual(book["legs"][0]["firm_stop"], 63550)
+
+    def test_core_and_add_keep_independent_anchors(self):
+        core = larry._new_position_leg("CORE", "LONG", 4, 64000, 300, 4, 80)
+        add = larry._new_position_leg("ADD", "LONG", 2, 64600, 200, 4, 80)
+        self.assertEqual(core["firm_stop"], 63550)
+        self.assertEqual(add["firm_stop"], 64300)
+        self.assertNotEqual(core["tp1_trigger"], add["tp1_trigger"])
+
+    def test_add_requires_position_to_clear_cost_hurdle(self):
+        state = larry.default_engine_state()
+        state["position_legs"].update({"reconciled": True, "legs": [
+            larry._new_position_leg("CORE", "LONG", 4, 65000, 300, 4, 75)
+        ]})
+        state["add_on_state"]["last_add_confidence_pct"] = 75
+        larry._CYCLE_CONTEXT["decision_context"] = {"price": 65050, "active_score": 4}
+        ok, reason = larry.should_allow_progressive_add(state, 4, 6, {"confidence_pct": 75, "score": 4})
+        self.assertFalse(ok)
+        self.assertIn("requires_working_position", reason)
+        larry._CYCLE_CONTEXT["decision_context"] = {"price": 65200, "active_score": 4}
+        ok, _ = larry.should_allow_progressive_add(state, 4, 6, {"confidence_pct": 75, "score": 4})
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":
