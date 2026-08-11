@@ -277,14 +277,43 @@ ENTRY_MIN_SCORE = int(os.getenv("ENTRY_MIN_SCORE", "4"))
 ADD_MIN_SCORE = int(os.getenv("ADD_MIN_SCORE", "4"))
 ADD_REQUIRE_PROFITABLE = os.getenv("ADD_REQUIRE_PROFITABLE", "true").lower() in ("1", "true", "yes")
 ADD_MIN_FAVORABLE_PCT = float(os.getenv("ADD_MIN_FAVORABLE_PCT", "0.0016"))
+POSITION_SIZE_LADDER = [4, 6, 10, 15, 20]
+PULLBACK_FIRST_ADD_ENABLED = os.getenv("PULLBACK_FIRST_ADD_ENABLED", "true").lower() in ("1", "true", "yes")
+PULLBACK_MAX_TARGET_CONTRACTS = int(os.getenv("PULLBACK_MAX_TARGET_CONTRACTS", "6"))
+PULLBACK_MAX_ADVERSE_ATR = float(os.getenv("PULLBACK_MAX_ADVERSE_ATR", "0.35"))
+
+
+def normalized_position_size_ladder(values: Any, max_contracts: int) -> List[int]:
+    """Return a monotonic target ladder ending at the configured hard ceiling."""
+    hard_max = max(1, safe_int(max_contracts, 1))
+    raw = values if isinstance(values, (list, tuple)) else [4, 6, 10, 15, hard_max]
+    ladder = sorted({max(1, min(hard_max, safe_int(value, 0))) for value in raw if safe_int(value, 0) > 0})
+    if not ladder:
+        ladder = [min(4, hard_max)]
+    if ladder[-1] != hard_max:
+        ladder.append(hard_max)
+    return ladder
+
+
+def next_position_size_ladder_target(current_abs: int, desired_abs: int,
+                                     ladder: Optional[List[int]] = None) -> int:
+    """Advance at most one rung; never jump directly to the aspirational target."""
+    current = max(0, safe_int(current_abs, 0))
+    desired = max(0, min(MAX_CONVICTION_CONTRACTS, safe_int(desired_abs, 0)))
+    rungs = normalized_position_size_ladder(ladder or POSITION_SIZE_LADDER, MAX_CONVICTION_CONTRACTS)
+    if desired <= current:
+        return desired
+    eligible = [rung for rung in rungs if current < rung <= desired]
+    return eligible[0] if eligible else current
+
 POSITION_LEGS_ENABLED = os.getenv("POSITION_LEGS_ENABLED", "true").lower() in ("1", "true", "yes")
 LEG_TSL_ACTIVATION_R = float(os.getenv("LEG_TSL_ACTIVATION_R", "1.25"))
 LEG_TP1_R_MULTIPLE = float(os.getenv("LEG_TP1_R_MULTIPLE", "1.0"))
 INITIAL_ENTRY_MAX_CONTRACTS = int(os.getenv("INITIAL_ENTRY_MAX_CONTRACTS", "4"))
 ADD_MAX_CONTRACTS = int(os.getenv("ADD_MAX_CONTRACTS", "2"))
-EXPECTED_CONFIG_VERSION = "v46.1_tp1_before_tsl"
+EXPECTED_CONFIG_VERSION = "v47_progressive_leg_ladder"
 # Filled from the canonical strategy_config.json after release construction.
-EXPECTED_CONFIG_SHA256 = "a1d5a7c1510133ef4c794d576fd649555b71524773de29c3d7015e490b668570"
+EXPECTED_CONFIG_SHA256 = "cc8022fb49b680397285d6fd2e3ed77dbbcb492acca22578ae42c4c5bef96003"
 DAILY_NET_LOSS_LIMIT_USD = float(os.getenv("DAILY_NET_LOSS_LIMIT_USD", "25"))
 COUNTERTREND_ENTRIES_ENABLED = os.getenv("COUNTERTREND_ENTRIES_ENABLED", "false").lower() in ("1", "true", "yes")
 NEUTRAL_REGIME_MAX_CONTRACTS = int(os.getenv("NEUTRAL_REGIME_MAX_CONTRACTS", str(CONTRACTS_PER_TRADE_PROBE)))
@@ -427,7 +456,7 @@ ENGINE_STATE_BLOB = "perp_engine_state.json"
 UNIFIED_HEARTBEAT_BLOB = "coinbase_unified_heartbeat.json"
 LEGACY_HEARTBEAT_BLOB = "perp_heartbeat.json"
 PERP_POSITION_STATE_BLOB = "perp_position_state.json"
-PERP_TRADES_LEDGER_BLOB = "perp_trades_ledger.csv"
+PERP_TRADES_LEDGER_BLOB = "perp_trades_ledger_v47.csv"
 PERP_LEG_LEDGER_BLOB = "perp_position_legs_ledger.csv"
 SPOT_POSITION_STATE_BLOB = "coinbase_spot_position_state.json"
 SPOT_TRADES_LEDGER_BLOB = "coinbase_spot_trades_ledger.csv"
@@ -459,6 +488,10 @@ DEFAULT_STRATEGY_CONFIG = {
     "ADD_MIN_SCORE": ADD_MIN_SCORE,
     "ADD_REQUIRE_PROFITABLE": ADD_REQUIRE_PROFITABLE,
     "ADD_MIN_FAVORABLE_PCT": ADD_MIN_FAVORABLE_PCT,
+    "POSITION_SIZE_LADDER": POSITION_SIZE_LADDER,
+    "PULLBACK_FIRST_ADD_ENABLED": PULLBACK_FIRST_ADD_ENABLED,
+    "PULLBACK_MAX_TARGET_CONTRACTS": PULLBACK_MAX_TARGET_CONTRACTS,
+    "PULLBACK_MAX_ADVERSE_ATR": PULLBACK_MAX_ADVERSE_ATR,
     "POSITION_LEGS_ENABLED": POSITION_LEGS_ENABLED,
     "LEG_TSL_ACTIVATION_R": LEG_TSL_ACTIVATION_R,
     "LEG_TP1_R_MULTIPLE": LEG_TP1_R_MULTIPLE,
@@ -557,7 +590,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v46_1_tp1_before_tsl")
+log = logging.getLogger("larry_perp_v47_progressive_leg_ladder")
 
 # =============================================================================
 # UTILITIES
@@ -953,7 +986,7 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "PROBE_PCT", "PARTIAL_PCT", "STRONG_PCT",
         "REVERSAL_NEAR_BB_PCT", "REVERSAL_RSI_SOFT_LONG_MAX", "REVERSAL_RSI_SOFT_SHORT_MIN",
         "MIN_FUTURES_EQUITY_BUFFER_USD", "ADAPTIVE_ENTRY_GRACE_MINUTES", "ADAPTIVE_MIN_ADVERSE_ATR", "DAILY_NET_LOSS_LIMIT_USD",
-        "ADD_MIN_FAVORABLE_PCT", "LEG_TSL_ACTIVATION_R", "LEG_TP1_R_MULTIPLE",
+        "ADD_MIN_FAVORABLE_PCT", "PULLBACK_MAX_ADVERSE_ATR", "LEG_TSL_ACTIVATION_R", "LEG_TP1_R_MULTIPLE",
         "MAX_EFFECTIVE_LEVERAGE", "RSI_LONG_MAX", "RSI_SHORT_MIN",
         "STOCH_LONG_MAX", "STOCH_SHORT_MIN", "VOL_SPIKE_MIN", "SPOT_MIN_ORDER_USD",
     ]
@@ -971,13 +1004,13 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "ADAPTIVE_REDUCE_SCORE", "ADAPTIVE_EXIT_SCORE", "ADAPTIVE_CONFIRM_CYCLES", "ADAPTIVE_REENTRY_COOLDOWN_MINUTES",
         "SWING_PIVOT_LEFT_BARS", "SWING_PIVOT_RIGHT_BARS",
         "NEUTRAL_REGIME_MAX_CONTRACTS",
-        "ENTRY_MIN_SCORE", "ADD_MIN_SCORE", "MAX_POSITION_ADDS", "INITIAL_ENTRY_MAX_CONTRACTS", "ADD_MAX_CONTRACTS",
+        "ENTRY_MIN_SCORE", "ADD_MIN_SCORE", "MAX_POSITION_ADDS", "INITIAL_ENTRY_MAX_CONTRACTS", "ADD_MAX_CONTRACTS", "PULLBACK_MAX_TARGET_CONTRACTS",
     ]
     # STREAK_PAUSE_MINUTES is normalized for display only; apply_strategy_config always
     # derives the effective pause length from STREAK_PAUSE_HOURS (single source of truth,
     # see v30 fix note there) so editing only the hours field on the dashboard takes effect.
     float_keys += ["STREAK_PAUSE_HOURS", "STREAK_PAUSE_MINUTES"]
-    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED", "ADD_REQUIRE_PROFITABLE", "POSITION_LEGS_ENABLED"]
+    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED", "ADD_REQUIRE_PROFITABLE", "PULLBACK_FIRST_ADD_ENABLED", "POSITION_LEGS_ENABLED"]
     for k in float_keys:
         cfg[k] = safe_float(cfg.get(k), safe_float(DEFAULT_STRATEGY_CONFIG.get(k), 0.0))
     for k in int_keys:
@@ -985,6 +1018,10 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
     for k in bool_keys:
         cfg[k] = _bool_from_any(cfg.get(k), bool(DEFAULT_STRATEGY_CONFIG.get(k)))
     cfg["SPOT_TRANCHE_TARGETS_PCT"] = _pct_list(cfg.get("SPOT_TRANCHE_TARGETS_PCT"), SPOT_TRANCHE_TARGETS_PCT)
+    raw_ladder = cfg.get("POSITION_SIZE_LADDER", POSITION_SIZE_LADDER)
+    if not isinstance(raw_ladder, (list, tuple)):
+        raw_ladder = POSITION_SIZE_LADDER
+    cfg["POSITION_SIZE_LADDER"] = [safe_int(value, 0) for value in raw_ladder]
     return cfg
 
 
@@ -1015,7 +1052,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     This keeps the current file structure stable while making parameters live
     configurable. Product IDs and exchange plumbing remain code/env controlled.
     """
-    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, ENTRY_MIN_SCORE, ADD_MIN_SCORE, ADD_REQUIRE_PROFITABLE, ADD_MIN_FAVORABLE_PCT, POSITION_LEGS_ENABLED, LEG_TSL_ACTIVATION_R, LEG_TP1_R_MULTIPLE, INITIAL_ENTRY_MAX_CONTRACTS, ADD_MAX_CONTRACTS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
+    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, ENTRY_MIN_SCORE, ADD_MIN_SCORE, ADD_REQUIRE_PROFITABLE, ADD_MIN_FAVORABLE_PCT, POSITION_SIZE_LADDER, PULLBACK_FIRST_ADD_ENABLED, PULLBACK_MAX_TARGET_CONTRACTS, PULLBACK_MAX_ADVERSE_ATR, POSITION_LEGS_ENABLED, LEG_TSL_ACTIVATION_R, LEG_TP1_R_MULTIPLE, INITIAL_ENTRY_MAX_CONTRACTS, ADD_MAX_CONTRACTS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
     global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_ENTRY_GRACE_MINUTES, ADAPTIVE_MIN_ADVERSE_ATR, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES, DAILY_NET_LOSS_LIMIT_USD
@@ -1049,6 +1086,10 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     ADD_MIN_SCORE = max(ENTRY_MIN_SCORE, min(4, safe_int(cfg.get("ADD_MIN_SCORE"), ADD_MIN_SCORE)))
     ADD_REQUIRE_PROFITABLE = _bool_from_any(cfg.get("ADD_REQUIRE_PROFITABLE"), ADD_REQUIRE_PROFITABLE)
     ADD_MIN_FAVORABLE_PCT = max(0.0, safe_float(cfg.get("ADD_MIN_FAVORABLE_PCT"), ADD_MIN_FAVORABLE_PCT))
+    POSITION_SIZE_LADDER = normalized_position_size_ladder(cfg.get("POSITION_SIZE_LADDER"), MAX_CONVICTION_CONTRACTS)
+    PULLBACK_FIRST_ADD_ENABLED = _bool_from_any(cfg.get("PULLBACK_FIRST_ADD_ENABLED"), PULLBACK_FIRST_ADD_ENABLED)
+    PULLBACK_MAX_TARGET_CONTRACTS = max(1, min(MAX_CONVICTION_CONTRACTS, safe_int(cfg.get("PULLBACK_MAX_TARGET_CONTRACTS"), PULLBACK_MAX_TARGET_CONTRACTS)))
+    PULLBACK_MAX_ADVERSE_ATR = max(0.0, safe_float(cfg.get("PULLBACK_MAX_ADVERSE_ATR"), PULLBACK_MAX_ADVERSE_ATR))
     POSITION_LEGS_ENABLED = _bool_from_any(cfg.get("POSITION_LEGS_ENABLED"), POSITION_LEGS_ENABLED)
     LEG_TSL_ACTIVATION_R = max(0.25, safe_float(cfg.get("LEG_TSL_ACTIVATION_R"), LEG_TSL_ACTIVATION_R))
     LEG_TP1_R_MULTIPLE = max(0.5, safe_float(cfg.get("LEG_TP1_R_MULTIPLE"), LEG_TP1_R_MULTIPLE))
@@ -1512,11 +1553,11 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v46_1_tp1_before_tsl",
+        "version": "larry_perp_v47_progressive_leg_ladder",
         "deployment": {
-            "version": "v46.1",
-            "deployed_at": "2026-08-10",
-            "release": "tp1_before_tsl",
+            "version": "v47",
+            "deployed_at": "not_deployed",
+            "release": "progressive_leg_ladder",
         },
         "phantom": {
             "state": "MONITORING",
@@ -4655,12 +4696,28 @@ def should_allow_progressive_add(state: Dict[str, Any], current_signed: int, tar
         favorable_pct = (current_price / core_anchor - 1.0) if current_signed > 0 else (core_anchor / current_price - 1.0)
     decision["add_favorable_pct"] = favorable_pct
     decision["add_cost_hurdle_pct"] = ADD_MIN_FAVORABLE_PCT
-    if ADD_REQUIRE_PROFITABLE and favorable_pct < ADD_MIN_FAVORABLE_PCT:
-        return False, f"add_requires_working_position_{favorable_pct:.4%}_below_{ADD_MIN_FAVORABLE_PCT:.4%}"
     add_state = state.setdefault("add_on_state", default_engine_state().get("add_on_state", {}))
+    adds_count = safe_int(add_state.get("adds_count"), 0)
+    if ADD_REQUIRE_PROFITABLE and favorable_pct < ADD_MIN_FAVORABLE_PCT:
+        core_atrs = [safe_float(leg.get("atr_at_entry"), 0.0) for leg in open_legs if safe_float(leg.get("atr_at_entry"), 0.0) > 0]
+        core_atr = sum(core_atrs) / len(core_atrs) if core_atrs else 0.0
+        adverse_move = max(0.0, -favorable_pct * core_anchor) if core_anchor else float("inf")
+        adverse_atr = adverse_move / core_atr if core_atr > 0 else float("inf")
+        pullback_ok = bool(
+            PULLBACK_FIRST_ADD_ENABLED
+            and adds_count == 0
+            and abs(target_signed) <= PULLBACK_MAX_TARGET_CONTRACTS
+            and active_score >= ADD_MIN_SCORE
+            and favorable_pct < 0
+            and adverse_atr <= PULLBACK_MAX_ADVERSE_ATR
+        )
+        decision["pullback_add"] = pullback_ok
+        decision["pullback_adverse_atr"] = adverse_atr if math.isfinite(adverse_atr) else None
+        decision["pullback_max_adverse_atr"] = PULLBACK_MAX_ADVERSE_ATR
+        if not pullback_ok:
+            return False, f"add_requires_working_position_requires_strength_or_bounded_first_pullback_{favorable_pct:.4%}_adverse_{adverse_atr:.2f}ATR"
     confidence = safe_int(decision.get("confidence_pct"), 0)
     last_conf = safe_int(add_state.get("last_add_confidence_pct"), 0)
-    adds_count = safe_int(add_state.get("adds_count"), 0)
     if adds_count >= MAX_POSITION_ADDS:
         return False, f"max_position_adds_reached_{adds_count}/{MAX_POSITION_ADDS}"
     if last_conf and confidence < last_conf:
@@ -5149,7 +5206,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v46_1_tp1_before_tsl",
+        "version": "larry_perp_v47_progressive_leg_ladder",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -5263,11 +5320,11 @@ def run_once(cb: Any, gcs: GCS) -> None:
         state = default_engine_state()
     # Persisted state survives releases; stamp the running binary identity every
     # cycle rather than inheriting the prior release's metadata indefinitely.
-    state["version"] = "larry_perp_v46_1_tp1_before_tsl"
+    state["version"] = "larry_perp_v47_progressive_leg_ladder"
     state["deployment"] = {
-        "version": "v46.1",
-        "deployed_at": "2026-08-10",
-        "release": "tp1_before_tsl",
+        "version": "v47",
+        "deployed_at": "not_deployed",
+        "release": "progressive_leg_ladder",
     }
 
     strategy_cfg = load_strategy_config(gcs)
@@ -5645,8 +5702,13 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             target = direction_sign * min(abs(target), INITIAL_ENTRY_MAX_CONTRACTS)
                             sizing_decision["initial_entry_cap"] = INITIAL_ENTRY_MAX_CONTRACTS
                         elif (current_for_cap > 0) == (direction_sign > 0) and abs(target) > abs(current_for_cap):
-                            target = direction_sign * min(abs(target), abs(current_for_cap) + ADD_MAX_CONTRACTS)
-                            sizing_decision["per_add_contract_cap"] = ADD_MAX_CONTRACTS
+                            desired_abs = abs(target)
+                            ladder_target = next_position_size_ladder_target(abs(current_for_cap), desired_abs)
+                            target = direction_sign * ladder_target
+                            sizing_decision["position_size_ladder"] = list(POSITION_SIZE_LADDER)
+                            sizing_decision["ladder_from_contracts"] = abs(current_for_cap)
+                            sizing_decision["ladder_target_contracts"] = ladder_target
+                            sizing_decision["ladder_add_contracts"] = max(0, ladder_target - abs(current_for_cap))
                         # v31: resize BEFORE building the plan / progressive-add check so
                         # everything downstream sees the leverage-capped target. A strong
                         # signal now executes at the largest safe size instead of being

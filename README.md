@@ -595,3 +595,22 @@ v35 production baseline:
 - First retry sizing: probe only
 - Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v35_20260723_1024`
 - Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v35_20260723_1024.json`
+## v47 progressive-leg track record (prepared, not deployed)
+
+Larry v47 uses a `4 -> 6 -> 10 -> 15 -> 20` total-position ladder. Every
+confirmed increase is recorded and managed as a new position leg with its own
+fill price, locked ATR, firm stop, TP1 and trailing-stop lifecycle. The first
+`4 -> 6` increase may be bought/sold into a bounded pullback of no more than
+0.35 ATR when the score remains strong; later increases require the existing
+position to be working after costs. Only one ladder rung can be added per
+decision cycle.
+
+The new 8-12 week record uses `perp_trades_ledger_v47.csv`; the older
+`perp_trades_ledger.csv` remains a pre-inception archive. After deployment,
+start the baseline only while the verified exchange position is flat:
+
+`/api/reset_clean_book?confirm=START_NEW_TRACK_RECORD&amount=2000`
+
+This sets the tracking start timestamp and $2,000 baseline without deleting
+the historical ledgers. Freeze strategy parameters during the measurement
+window; permit only versioned bug, execution-safety, or data-integrity fixes.

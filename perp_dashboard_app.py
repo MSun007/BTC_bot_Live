@@ -212,7 +212,7 @@ GCS_PERP_STATE = f"{BUCKET_PREFIX}/perp_engine_state.json"
 DASHBOARD_VERSION = "v46"
 DASHBOARD_DEPLOYED_AT = "2026-08-10"
 GCS_PERP_TRADES = f"{BUCKET_PREFIX}/coinbase_perp_trades_log.csv"
-GCS_PERP_TRADES_LEDGER = f"{BUCKET_PREFIX}/perp_trades_ledger.csv"  # v12 canonical bot ledger
+GCS_PERP_TRADES_LEDGER = f"{BUCKET_PREFIX}/perp_trades_ledger_v47.csv"  # v47 clean track-record ledger
 GCS_MANUAL_POSITION_EVENTS = f"{BUCKET_PREFIX}/manual_position_events.csv"
 GCS_CAPITAL = f"{BUCKET_PREFIX}/unified_capital_state.json"
 GCS_SIGNAL_HISTORY = f"{BUCKET_PREFIX}/coinbase_signal_history.json"
@@ -227,6 +227,11 @@ DEFAULT_CONFIG = {
     "PERP_PRODUCT_ID": "BIP-20DEC30-CDE",
     "CONTRACT_SIZE_BTC": 0.01,
     "MAX_CONVICTION_CONTRACTS": 10,
+    "POSITION_SIZE_LADDER": [4, 6, 10, 15, 20],
+    "MAX_POSITION_ADDS": 4,
+    "PULLBACK_FIRST_ADD_ENABLED": True,
+    "PULLBACK_MAX_TARGET_CONTRACTS": 6,
+    "PULLBACK_MAX_ADVERSE_ATR": 0.35,
     "CONTRACTS_PER_TRADE": 2,
     "CONTRACTS_PER_TRADE_FULL": 10,
     "CONTRACTS_PER_TRADE_PARTIAL": 4,
@@ -1128,6 +1133,11 @@ def load_config() -> Dict[str, Any]:
         "PERP_PRODUCT_ID": ["PERP_PRODUCT_ID", "PRODUCT_ID", "SYMBOL"],
         "CONTRACT_SIZE_BTC": ["CONTRACT_SIZE_BTC"],
         "MAX_CONVICTION_CONTRACTS": ["MAX_CONVICTION_CONTRACTS"],
+        "POSITION_SIZE_LADDER": ["POSITION_SIZE_LADDER"],
+        "MAX_POSITION_ADDS": ["MAX_POSITION_ADDS"],
+        "PULLBACK_FIRST_ADD_ENABLED": ["PULLBACK_FIRST_ADD_ENABLED"],
+        "PULLBACK_MAX_TARGET_CONTRACTS": ["PULLBACK_MAX_TARGET_CONTRACTS"],
+        "PULLBACK_MAX_ADVERSE_ATR": ["PULLBACK_MAX_ADVERSE_ATR"],
         "CONTRACTS_PER_TRADE": ["CONTRACTS_PER_TRADE"],
         "CONTRACTS_PER_TRADE_FULL": ["CONTRACTS_PER_TRADE_FULL"],
         "CONTRACTS_PER_TRADE_PARTIAL": ["CONTRACTS_PER_TRADE_PARTIAL"],
@@ -1184,14 +1194,18 @@ def load_config() -> Dict[str, Any]:
         cfg["CONFIG_UPDATED_AT"] = None
 
     # Normalize common numeric fields.
-    for k in ["CONTRACT_SIZE_BTC", "ATR_STOP_MULTIPLIER", "TSL_ACTIVATION_PCT", "TSL_TRAIL_PCT", "PHANTOM_EXTENSION_PCT", "FUNDING_LONG_MAX", "FUNDING_SHORT_MIN", "FUNDING_SIZE_REDUCE_AT", "TP1_PCT", "TP1_FRACTION", "MAX_EFFECTIVE_LEVERAGE", "MIN_FUTURES_EQUITY_BUFFER_USD", "RSI_BUY_FLOOR", "RSI_BUY_THRESHOLD", "BB_STD", "VOLUME_MULTIPLIER", "STOCH_RSI_THRESHOLD"]:
+    for k in ["CONTRACT_SIZE_BTC", "ATR_STOP_MULTIPLIER", "TSL_ACTIVATION_PCT", "TSL_TRAIL_PCT", "PHANTOM_EXTENSION_PCT", "FUNDING_LONG_MAX", "FUNDING_SHORT_MIN", "FUNDING_SIZE_REDUCE_AT", "TP1_PCT", "TP1_FRACTION", "MAX_EFFECTIVE_LEVERAGE", "MIN_FUTURES_EQUITY_BUFFER_USD", "RSI_BUY_FLOOR", "RSI_BUY_THRESHOLD", "BB_STD", "VOLUME_MULTIPLIER", "STOCH_RSI_THRESHOLD", "PULLBACK_MAX_ADVERSE_ATR"]:
         cfg[k] = safe_float(cfg.get(k), DEFAULT_CONFIG[k])
-    for k in ["MAX_CONVICTION_CONTRACTS", "CONTRACTS_PER_TRADE", "CONTRACTS_PER_TRADE_FULL", "CONTRACTS_PER_TRADE_PARTIAL", "CONTRACTS_PER_TRADE_PROBE", "MACRO_BLOCKED_PROBE_CONTRACTS", "RSI_PERIOD", "BB_PERIOD", "VOLUME_AVG_PERIOD", "STOCH_RSI_PERIOD", "ATR_PERIOD", "SPOT_MAX_LADDER_UNITS", "PERP_STRATEGY_SLOTS", "DAILY_STOP_LIMIT", "LOSS_STREAK_LIMIT", "STREAK_PAUSE_HOURS", "SPOT_ENTRY_COOLDOWN_SEC", "PERP_ENTRY_COOLDOWN_SEC", "BRIDGE_ENTRY_COOLDOWN_SEC"]:
+    for k in ["MAX_CONVICTION_CONTRACTS", "CONTRACTS_PER_TRADE", "CONTRACTS_PER_TRADE_FULL", "CONTRACTS_PER_TRADE_PARTIAL", "CONTRACTS_PER_TRADE_PROBE", "MACRO_BLOCKED_PROBE_CONTRACTS", "RSI_PERIOD", "BB_PERIOD", "VOLUME_AVG_PERIOD", "STOCH_RSI_PERIOD", "ATR_PERIOD", "SPOT_MAX_LADDER_UNITS", "PERP_STRATEGY_SLOTS", "DAILY_STOP_LIMIT", "LOSS_STREAK_LIMIT", "STREAK_PAUSE_HOURS", "SPOT_ENTRY_COOLDOWN_SEC", "PERP_ENTRY_COOLDOWN_SEC", "BRIDGE_ENTRY_COOLDOWN_SEC", "MAX_POSITION_ADDS", "PULLBACK_MAX_TARGET_CONTRACTS"]:
         cfg[k] = safe_int(cfg.get(k), DEFAULT_CONFIG[k])
     if isinstance(cfg.get("SPOT_TRANCHE_TARGETS_PCT"), str):
         cfg["SPOT_TRANCHE_TARGETS_PCT"] = [safe_float(x, 0) for x in cfg["SPOT_TRANCHE_TARGETS_PCT"].replace(";", ",").split(",") if str(x).strip()]
     if not isinstance(cfg.get("SPOT_TRANCHE_TARGETS_PCT"), list):
         cfg["SPOT_TRANCHE_TARGETS_PCT"] = list(DEFAULT_CONFIG["SPOT_TRANCHE_TARGETS_PCT"])
+    if not isinstance(cfg.get("POSITION_SIZE_LADDER"), list):
+        cfg["POSITION_SIZE_LADDER"] = list(DEFAULT_CONFIG["POSITION_SIZE_LADDER"])
+    cfg["POSITION_SIZE_LADDER"] = sorted({safe_int(x, 0) for x in cfg["POSITION_SIZE_LADDER"] if safe_int(x, 0) > 0})
+    cfg["PULLBACK_FIRST_ADD_ENABLED"] = str(cfg.get("PULLBACK_FIRST_ADD_ENABLED", True)).lower() in ("1", "true", "yes", "on")
     return cfg
 
 
@@ -2946,6 +2960,9 @@ STRATEGY_CONFIG_NUMERIC_BOUNDS = {
     "TP1_STRONG_TRIGGER_PCT": (0.0005, 0.5),
     "TP1_FULL_TRIGGER_PCT": (0.0005, 0.5),
     "MAX_CONVICTION_CONTRACTS": (1, 500),
+    "MAX_POSITION_ADDS": (0, 20),
+    "PULLBACK_MAX_TARGET_CONTRACTS": (1, 500),
+    "PULLBACK_MAX_ADVERSE_ATR": (0.0, 3.0),
     "CONTRACT_SIZE_BTC": (0.0001, 10.0),
     "DAILY_STOP_LIMIT": (1, 50),
     "LOSS_STREAK_LIMIT": (1, 50),
@@ -3095,37 +3112,64 @@ def api_update_strategy_param():
 
 @app.route("/api/reset_clean_book", methods=["GET", "POST"])
 def reset_clean_book():
-    """Reset trade-attribution ledger without closing Coinbase positions.
+    """Start a new auditable track-record window without deleting old ledgers.
 
-    Example:
-      /api/reset_clean_book?contracts=6&avg=79780
-
-    This writes tracking_start_timestamp and opening_perp_position to GCS.
-    The account baseline is left untouched unless set_baseline=1 is passed.
+    The endpoint snapshots the verified live Coinbase position. A flat reset is
+    preferred; resetting with exposure requires include_open_position=1. Pass
+    amount=2000 to atomically set the new Starting Capital / Baseline.
     """
     try:
+        confirmation = str(request.args.get("confirm") or "").upper()
+        if confirmation != "START_NEW_TRACK_RECORD":
+            return jsonify({"ok": False, "error": "confirm=START_NEW_TRACK_RECORD is required"}), 400
         cfg = load_config()
         product_id = request.args.get("product_id") or cfg.get("PERP_PRODUCT_ID") or "BIP-20DEC30-CDE"
-        contracts = safe_float(request.args.get("contracts"), 6.0)
-        avg = safe_float(request.args.get("avg") or request.args.get("avg_entry_price"), 79780.0)
-        side = (request.args.get("side") or "LONG").upper()
         contract_size = safe_float(request.args.get("contract_size_btc"), safe_float(cfg.get("CONTRACT_SIZE_BTC"), 0.01)) or 0.01
+        positions = futures_positions(product_id, contract_size)
+        live = next((position for position in positions if str(position.get("product_id") or product_id) == product_id), None)
+        contracts = abs(safe_int((live or {}).get("signed_contracts"), safe_int((live or {}).get("contracts"), 0)))
+        side = str((live or {}).get("side") or "FLAT").upper()
+        avg = safe_float((live or {}).get("avg_entry_price"), 0.0)
+        include_open = str(request.args.get("include_open_position") or "").lower() in ("1", "true", "yes", "on")
+        if contracts and not include_open:
+            return jsonify({
+                "ok": False,
+                "error": "Coinbase position is open; close it first or explicitly pass include_open_position=1.",
+                "live_position": live,
+            }), 409
+        baseline = safe_float(request.args.get("amount"), None)
+        if baseline is None or baseline <= 0:
+            return jsonify({"ok": False, "error": "A positive amount is required for the new baseline."}), 400
         existing = load_capital_state()
         payload = dict(existing) if isinstance(existing, dict) else {}
-        payload["tracking_start_timestamp"] = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-        payload["opening_perp_position"] = {
-            "product_id": product_id,
-            "side": side,
-            "contracts": contracts,
-            "avg_entry_price": avg,
-            "contract_size_btc": contract_size,
-            "source": "manual_coinbase_ui_reset",
-        }
-        payload["last_updated"] = "clean_book_reset_from_dashboard"
-        payload["source"] = "coinbase_only"
+        start_timestamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        payload.update({
+            "tracking_start_timestamp": start_timestamp,
+            "starting_combined_capital": baseline,
+            "manual_override": baseline,
+            "started_at": now_et(),
+            "last_updated": "v47_track_record_start",
+            "source": "manual_track_record_baseline",
+            "track_record_version": "v47_progressive_leg_ladder",
+        })
+        if contracts:
+            payload["opening_perp_position"] = {
+                "product_id": product_id,
+                "side": side,
+                "contracts": contracts,
+                "avg_entry_price": avg,
+                "contract_size_btc": contract_size,
+                "source": "verified_coinbase_position_at_track_record_start",
+            }
+        else:
+            payload.pop("opening_perp_position", None)
         write_json(GCS_CAPITAL, payload)
         _cache.clear()
-        return jsonify({"ok": True, "capital_state": payload})
+        return jsonify({
+            "ok": True,
+            "capital_state": payload,
+            "message": "New track record started; historical ledgers were preserved and excluded by timestamp.",
+        })
     except Exception as e:
         # v73 fix: see api_data -- tracebacks are logged server-side, not returned.
         app.logger.exception("request failed")
@@ -3897,7 +3941,7 @@ button,input,select{font-family:inherit}
 <section class="card span6"><h2>Open Perp Exposure</h2><div class="table-wrap"><table class="table"><thead><tr><th>Side</th><th>Contracts</th><th>BTC Exp.</th><th>Avg Entry</th><th>Mark</th><th>Book Unrealized</th><th>Cost Basis</th></tr></thead><tbody id="perpPosBody"></tbody></table></div></section>
 <section class="card span4 diagnostic-card"><h2>Legacy Clean Strategy Book <span class="method-badge">diagnostic</span></h2><div class="kv"><span class="k">Book avg entry</span><span class="v" id="bookAvg">—</span></div><div class="kv"><span class="k">Book open contracts</span><span class="v" id="bookContracts">—</span></div><div class="kv"><span class="k">Book unrealized P&L</span><span class="v" id="bookUnr">—</span></div><div class="kv"><span class="k">Closed P&L since reset</span><span class="v" id="realizedReset">—</span></div><div class="kv"><span class="k">Fees since tracking reset</span><span class="v" id="feesReset">—</span></div><div class="kv"><span class="k">Net book impact</span><span class="v" id="netBookImpact">—</span></div><div class="kv"><span class="k">New fills counted</span><span class="v" id="fillCount">—</span></div><div class="kv"><span class="k">Old fills ignored</span><span class="v" id="ignoredFillCount">—</span></div><div class="kv"><span class="k">Fee audit</span><span class="v"><a href="/api/fee_audit" target="_blank">Open</a></span></div><div class="pnl-note" id="tradePnlNote">—</div></section>
 <section class="card span6"><h2>Position Reconciler / Phantom Protection</h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Reconciler Status</div><div class="val" id="recStatus">—</div><div class="mini" id="recDetail">—</div></div><div class="metric"><div class="label">Target / Drift</div><div class="val" id="recOpening">—</div><div class="mini">Target exposure vs live Coinbase</div></div></div><div class="kv"><span class="k">Exchange net position</span><span class="v" id="recExchange">—</span></div><div class="kv"><span class="k">Local bot legs</span><span class="v" id="recBotLegs">—</span></div><div class="kv"><span class="k">Signed net contracts</span><span class="v" id="recSigned">—</span></div><div class="pnl-note" id="recSafeRule">—</div></section>
-<section class="card span12"><h2>Independent Position Legs</h2><div class="pnl-note" id="legSummary">Loading core/add reconciliation…</div><div class="leg-grid" id="positionLegGrid"></div><div class="version-note" id="deploymentVersion">Dashboard v46.1 · deployed 2026-08-10</div></section>
+<section class="card span12"><h2>Independent Position Legs</h2><div class="pnl-note" id="legSummary">Loading core/add reconciliation…</div><div class="leg-grid" id="positionLegGrid"></div><div class="version-note" id="deploymentVersion">Dashboard v47 · progressive leg ladder · not deployed</div></section>
 <section class="card span6"><h2>Execution Quality <span class="method-badge">Larry ledger · costs & slippage</span></h2><div class="metric-row"><div class="metric"><div class="label">Avg Slippage</div><div class="val" id="execAvgSlip">—</div><div class="mini" id="execSlipRange">Best / worst —</div></div><div class="metric"><div class="label">Maker / Taker</div><div class="val" id="execMakerTaker">—</div><div class="mini" id="execMakerTakerNote">Larry orders</div></div><div class="metric"><div class="label">Fees Paid</div><div class="val" id="execFeesPaid">—</div><div class="mini">From Larry ledger</div></div><div class="metric"><div class="label">Execution Score</div><div class="val" id="execScore">—</div><div class="mini" id="execScoreNote">Preliminary</div></div></div><div class="pnl-note" id="execQualityNote">Execution quality summarizes Larry trade fills. Current market IOC orders should appear mostly/all taker.</div></section>
 <section class="card span4 diagnostic-card"><h2>Signal History <span class="method-badge">diagnostic</span></h2><div id="sigHistory" class="mini">—</div></section>
 <section class="card span12 diagnostic-card"><h2>Detailed Accounting / Reference <span class="method-badge">diagnostic</span></h2><div class="table-wrap"><table class="table"><thead><tr><th>Book</th><th>Current Value / Basis</th><th>Clean Realized</th><th>Clean Unrealized</th><th>Funding</th><th>Fees</th><th>Notes</th></tr></thead><tbody id="acctBody"></tbody></table></div><div class="pnl-note">Clean performance uses the live Coinbase basis for the current position and post-reset fills. Coinbase exchange-native daily realized P&L is shown as a reference only and is not included in clean P&L or return on capital.</div></section>
@@ -4011,7 +4055,7 @@ function renderPositionLegs(d){
  const ok=book.reconciled===true, money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2}):'--';
  summary.textContent=`${ok?'RECONCILED':'DRIFT - NEW RISK BLOCKED'} | Internal ${book.internal_signed_contracts??0} / Coinbase ${book.exchange_signed_contracts??0} contracts`;
  grid.innerHTML=legs.length?legs.map((l,i)=>{const kind=String(l.kind||'LEG'), side=String(l.side||'--'), cls=kind==='CORE'?'core':'add'; return `<div class="leg-card ${cls}"><div class="leg-head"><div class="leg-name">${kind} ${i+1} | ${side} ${l.remaining_contracts}</div><div class="leg-badge">${l.tsl_active?'TSL ACTIVE':'PROTECTED'}</div></div><div class="leg-kv"><span>Entry</span><span>${money(l.entry_price)}</span><span>Open P&amp;L</span><span>${money(l.unrealized_pnl_usd)}</span><span>Entry conviction</span><span>${l.entry_score||'--'}/4 | ${l.entry_confidence_pct||'--'}%</span><span>Firm 1.5x ATR stop</span><span>${money(l.firm_stop)}</span><span>TP1 (${Number(cfg.LEG_TP1_R_MULTIPLE||1.25).toFixed(2)}R)</span><span>${money(l.tp1_trigger)}${l.tp1_done?' | taken':''}</span><span>TSL activation</span><span>${money(l.tsl_activation)}</span><span>TSL stop</span><span>${money(l.tsl_stop)}</span><span>Fees allocated</span><span>${money(l.allocated_fees_usd)}</span></div></div>`}).join(''):'<div class="tm-empty">No open Larry legs.</div>';
- const dep=es.deployment||{}, versionText=`Dashboard v46.1 | deployed 2026-08-10 | Engine ${dep.version||es.version||'--'}${dep.deployed_at?' | '+dep.deployed_at:''}`;
+ const dep=es.deployment||{}, versionText=`Dashboard v47 | progressive leg ladder | Engine ${dep.version||es.version||'--'}${dep.deployed_at?' | '+dep.deployed_at:''}`;
  set('deploymentVersion',versionText);
  let versionPill=$('deploymentVersionPill');
  if(!versionPill){versionPill=document.createElement('span');versionPill.id='deploymentVersionPill';versionPill.className='pill purple';document.querySelector('header .pill-row')?.prepend(versionPill)}
@@ -4062,6 +4106,7 @@ function updateSizingPreview(cfg){
  const partialPct = Number((document.getElementById('ctrlPartialPct')||{}).value || ((cfg.PARTIAL_PCT||0.40)*100));
  const strongPct = Number((document.getElementById('ctrlStrongPct')||{}).value || ((cfg.STRONG_PCT||0.70)*100));
  const adds = Number((document.getElementById('ctrlMaxAdds')||{}).value || cfg.MAX_POSITION_ADDS || 3);
+ const configuredLadder=Array.isArray(cfg.POSITION_SIZE_LADDER)?cfg.POSITION_SIZE_LADDER.map(Number).filter(x=>x>0):[];
  const tier=(pct)=>Math.max(1, Math.min(max, Math.round(max*(pct/100))));
  let probe=tier(probePct), partial=tier(partialPct), strong=tier(strongPct);
  if(max>=4){ probe=Math.max(1, Math.min(probe, max-3)); partial=Math.max(probe+1, Math.min(partial, max-2)); strong=Math.max(partial+1, Math.min(strong, max-1)); }

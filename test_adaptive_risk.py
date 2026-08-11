@@ -685,6 +685,59 @@ class IndependentLegTests(unittest.TestCase):
         ok, _ = larry.should_allow_progressive_add(state, 4, 6, {"confidence_pct": 75, "score": 4})
         self.assertTrue(ok)
 
+    def test_v47_position_ladder_advances_one_rung_at_a_time(self):
+        larry.MAX_CONVICTION_CONTRACTS = 20
+        larry.POSITION_SIZE_LADDER = [4, 6, 10, 15, 20]
+        ladder = [4, 6, 10, 15, 20]
+        self.assertEqual(larry.next_position_size_ladder_target(0, 20, ladder), 4)
+        self.assertEqual(larry.next_position_size_ladder_target(4, 20, ladder), 6)
+        self.assertEqual(larry.next_position_size_ladder_target(6, 20, ladder), 10)
+        self.assertEqual(larry.next_position_size_ladder_target(10, 20, ladder), 15)
+        self.assertEqual(larry.next_position_size_ladder_target(15, 20, ladder), 20)
+        self.assertEqual(larry.next_position_size_ladder_target(20, 20, ladder), 20)
+
+    def test_only_first_bounded_pullback_can_add_without_profit(self):
+        state = larry.default_engine_state()
+        state["position_legs"].update({"reconciled": True, "legs": [
+            larry._new_position_leg("CORE", "LONG", 4, 65000, 300, 4, 80)
+        ]})
+        state["add_on_state"]["last_add_confidence_pct"] = 80
+        larry._CYCLE_CONTEXT["decision_context"] = {"price": 64925, "active_score": 4}
+        decision = {"confidence_pct": 80, "score": 4}
+        ok, reason = larry.should_allow_progressive_add(state, 4, 6, decision)
+        self.assertTrue(ok, reason)
+        self.assertTrue(decision["pullback_add"])
+
+        state["add_on_state"]["adds_count"] = 1
+        ok, reason = larry.should_allow_progressive_add(state, 6, 10, {"confidence_pct": 80, "score": 4})
+        self.assertFalse(ok)
+        self.assertIn("requires_strength_or_bounded_first_pullback", reason)
+
+    def test_each_confirmed_add_creates_a_separate_risk_leg(self):
+        class FakeGCS:
+            def append_csv_row(self, *args, **kwargs):
+                return None
+
+        state = larry.default_engine_state()
+        sig = self.signal(price=65200, atr=250)
+        core = larry._new_position_leg("CORE", "LONG", 4, 65000, 300, 4, 80)
+        state["position_legs"].update({"reconciled": True, "legs": [core]})
+        result = {
+            "ok": True,
+            "before": {"signed_contracts": 4},
+            "after": {"signed_contracts": 6, "avg_entry_price": 65066.67},
+            "fills": {"avg_price": 65200},
+            "fees_usd": 1.0,
+        }
+        larry.record_position_leg_execution(FakeGCS(), state, result, "CORE_IAF_LONG_PHANTOM_CONFIRMED", sig, {"score": 4, "confidence_pct": 90})
+        open_legs = [leg for leg in state["position_legs"]["legs"] if leg["status"] == "OPEN"]
+        self.assertEqual(len(open_legs), 2)
+        self.assertEqual(open_legs[0]["original_contracts"], 4)
+        self.assertEqual(open_legs[1]["kind"], "ADD")
+        self.assertEqual(open_legs[1]["original_contracts"], 2)
+        self.assertEqual(open_legs[1]["entry_price"], 65200)
+        self.assertNotEqual(open_legs[0]["firm_stop"], open_legs[1]["firm_stop"])
+
 
 if __name__ == "__main__":
     unittest.main()
