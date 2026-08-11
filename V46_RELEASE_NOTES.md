@@ -14,7 +14,7 @@ Deployment date: 2026-08-10
 ## Risk ownership
 
 - Coinbase remains a netted position; Larry maintains separate CORE/ADD legs.
-- Each leg owns its entry, locked ATR, 1.5x ATR firm stop, 1.25R TP1, 1.0R TSL
+- Each leg owns its entry, locked ATR, 1.5x ATR firm stop, 1.0R TP1, 1.25R TSL
   activation, high/low watermark, trail, fees and realized/open P&L.
 - A leg trigger closes only that leg's assigned contracts unless an emergency or
   position-wide Adaptive Defense exit requires a larger reduction.
@@ -31,7 +31,7 @@ Deployment date: 2026-08-10
 - New responsive Independent Position Legs panel for desktop and mobile.
 - Reconciliation, entry, conviction, open P&L, stop, TP1, TSL and allocated fees
   are displayed per leg.
-- Dashboard v46 and deployment date are visible in the panel.
+- Dashboard v46.1 and deployment date are visible in the panel.
 
 ## Validation
 

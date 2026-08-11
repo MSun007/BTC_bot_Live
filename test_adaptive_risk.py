@@ -665,6 +665,12 @@ class IndependentLegTests(unittest.TestCase):
         self.assertEqual(add["firm_stop"], 64300)
         self.assertNotEqual(core["tp1_trigger"], add["tp1_trigger"])
 
+    def test_tp1_precedes_tsl_for_long_and_short_legs(self):
+        long_leg = larry._new_position_leg("CORE", "LONG", 3, 63865, 274.4266667, 4, 80)
+        short_leg = larry._new_position_leg("CORE", "SHORT", 3, 63865, 274.4266667, 4, 80)
+        self.assertLess(long_leg["tp1_trigger"], long_leg["tsl_activation"])
+        self.assertGreater(short_leg["tp1_trigger"], short_leg["tsl_activation"])
+
     def test_add_requires_position_to_clear_cost_hurdle(self):
         state = larry.default_engine_state()
         state["position_legs"].update({"reconciled": True, "legs": [

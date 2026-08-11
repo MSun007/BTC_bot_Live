@@ -278,13 +278,13 @@ ADD_MIN_SCORE = int(os.getenv("ADD_MIN_SCORE", "4"))
 ADD_REQUIRE_PROFITABLE = os.getenv("ADD_REQUIRE_PROFITABLE", "true").lower() in ("1", "true", "yes")
 ADD_MIN_FAVORABLE_PCT = float(os.getenv("ADD_MIN_FAVORABLE_PCT", "0.0016"))
 POSITION_LEGS_ENABLED = os.getenv("POSITION_LEGS_ENABLED", "true").lower() in ("1", "true", "yes")
-LEG_TSL_ACTIVATION_R = float(os.getenv("LEG_TSL_ACTIVATION_R", "1.0"))
-LEG_TP1_R_MULTIPLE = float(os.getenv("LEG_TP1_R_MULTIPLE", "1.25"))
+LEG_TSL_ACTIVATION_R = float(os.getenv("LEG_TSL_ACTIVATION_R", "1.25"))
+LEG_TP1_R_MULTIPLE = float(os.getenv("LEG_TP1_R_MULTIPLE", "1.0"))
 INITIAL_ENTRY_MAX_CONTRACTS = int(os.getenv("INITIAL_ENTRY_MAX_CONTRACTS", "4"))
 ADD_MAX_CONTRACTS = int(os.getenv("ADD_MAX_CONTRACTS", "2"))
-EXPECTED_CONFIG_VERSION = "v46_independent_legs"
+EXPECTED_CONFIG_VERSION = "v46.1_tp1_before_tsl"
 # Filled from the canonical strategy_config.json after release construction.
-EXPECTED_CONFIG_SHA256 = "bcfc079be052b449ed69c244d77d37591f7937c7d9c70802fc56fd2e65478f2f"
+EXPECTED_CONFIG_SHA256 = "a94c3005b057a29b305f905d473beff1a47d63cba60052679fa6713a16add4b5"
 DAILY_NET_LOSS_LIMIT_USD = float(os.getenv("DAILY_NET_LOSS_LIMIT_USD", "25"))
 COUNTERTREND_ENTRIES_ENABLED = os.getenv("COUNTERTREND_ENTRIES_ENABLED", "false").lower() in ("1", "true", "yes")
 NEUTRAL_REGIME_MAX_CONTRACTS = int(os.getenv("NEUTRAL_REGIME_MAX_CONTRACTS", str(CONTRACTS_PER_TRADE_PROBE)))
@@ -557,7 +557,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v46_independent_legs")
+log = logging.getLogger("larry_perp_v46_1_tp1_before_tsl")
 
 # =============================================================================
 # UTILITIES
@@ -1512,11 +1512,11 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v46_independent_legs",
+        "version": "larry_perp_v46_1_tp1_before_tsl",
         "deployment": {
-            "version": "v46",
+            "version": "v46.1",
             "deployed_at": "2026-08-10",
-            "release": "independent_position_legs",
+            "release": "tp1_before_tsl",
         },
         "phantom": {
             "state": "MONITORING",
@@ -3394,7 +3394,7 @@ def _new_position_leg(kind: str, side: str, contracts: int, entry_price: float,
         "tsl_active": False, "tsl_stop": None,
         "highest_price": entry if long_side else None,
         "lowest_price": entry if not long_side else None,
-        "tp1_done": False, "status": "OPEN",
+        "tp1_done": False, "status": "OPEN", "risk_sequence_version": "tp1_before_tsl_v1",
         "entry_score": safe_int(score, 0), "entry_confidence_pct": safe_int(confidence_pct, 0),
         "source": source, "opened_at": iso_utc(), "updated_at": iso_utc(),
         "realized_gross_pnl_usd": 0.0, "allocated_fees_usd": 0.0,
@@ -3442,6 +3442,14 @@ def update_position_leg_controls(state: Dict[str, Any], live_pos: Dict[str, Any]
             continue
         entry = safe_float(leg.get("entry_price"), 0.0)
         side = str(leg.get("side") or "").upper()
+        # v46.1 one-time migration: move TP1 ahead of TSL activation for
+        # existing open legs while preserving entry, locked ATR and firm stop.
+        if leg.get("risk_sequence_version") != "tp1_before_tsl_v1":
+            risk_distance = safe_float(leg.get("atr_at_entry"), 0.0) * ATR_MULTIPLIER
+            if entry > 0 and risk_distance > 0:
+                leg["tp1_trigger"] = entry + risk_distance * LEG_TP1_R_MULTIPLE if side == "LONG" else entry - risk_distance * LEG_TP1_R_MULTIPLE
+                leg["tsl_activation"] = entry + risk_distance * LEG_TSL_ACTIVATION_R if side == "LONG" else entry - risk_distance * LEG_TSL_ACTIVATION_R
+                leg["risk_sequence_version"] = "tp1_before_tsl_v1"
         if side == "LONG":
             leg["highest_price"] = max(safe_float(leg.get("highest_price"), entry), price)
             if not leg.get("tsl_active") and price >= safe_float(leg.get("tsl_activation"), float("inf")):
@@ -5141,7 +5149,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v46_independent_legs",
+        "version": "larry_perp_v46_1_tp1_before_tsl",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -5255,11 +5263,11 @@ def run_once(cb: Any, gcs: GCS) -> None:
         state = default_engine_state()
     # Persisted state survives releases; stamp the running binary identity every
     # cycle rather than inheriting the prior release's metadata indefinitely.
-    state["version"] = "larry_perp_v46_independent_legs"
+    state["version"] = "larry_perp_v46_1_tp1_before_tsl"
     state["deployment"] = {
-        "version": "v46",
+        "version": "v46.1",
         "deployed_at": "2026-08-10",
-        "release": "independent_position_legs",
+        "release": "tp1_before_tsl",
     }
 
     strategy_cfg = load_strategy_config(gcs)
