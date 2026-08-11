@@ -5253,6 +5253,14 @@ def run_once(cb: Any, gcs: GCS) -> None:
     state = load_engine_state(gcs)
     if not state:
         state = default_engine_state()
+    # Persisted state survives releases; stamp the running binary identity every
+    # cycle rather than inheriting the prior release's metadata indefinitely.
+    state["version"] = "larry_perp_v46_independent_legs"
+    state["deployment"] = {
+        "version": "v46",
+        "deployed_at": "2026-08-10",
+        "release": "independent_position_legs",
+    }
 
     strategy_cfg = load_strategy_config(gcs)
     apply_strategy_config(strategy_cfg)
