@@ -1556,7 +1556,7 @@ def default_engine_state() -> Dict[str, Any]:
         "version": "larry_perp_v47_progressive_leg_ladder",
         "deployment": {
             "version": "v47",
-            "deployed_at": "not_deployed",
+            "deployed_at": "2026-08-11",
             "release": "progressive_leg_ladder",
         },
         "phantom": {
@@ -5323,7 +5323,7 @@ def run_once(cb: Any, gcs: GCS) -> None:
     state["version"] = "larry_perp_v47_progressive_leg_ladder"
     state["deployment"] = {
         "version": "v47",
-        "deployed_at": "not_deployed",
+        "deployed_at": "2026-08-11",
         "release": "progressive_leg_ladder",
     }
 
