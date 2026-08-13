@@ -558,6 +558,20 @@ class AdaptiveRiskTests(unittest.TestCase):
         self.assertFalse(larry.is_transient_coinbase_error(exc))
         self.assertFalse(larry.should_rebuild_coinbase_client(exc))
 
+    def test_gcloud_storage_timeout_is_not_coinbase_failure(self):
+        import subprocess
+        exc = subprocess.TimeoutExpired(["gcloud", "storage", "cp", "x", "gs://bucket/state.json"], 30)
+        self.assertTrue(larry.is_gcs_storage_error(exc))
+        self.assertFalse(larry.is_transient_coinbase_error(exc))
+        self.assertFalse(larry.should_rebuild_coinbase_client(exc))
+
+    def test_ssl_eof_rebuilds_coinbase_client(self):
+        class SSLError(Exception):
+            pass
+        exc = SSLError("TLS/SSL connection has been closed (EOF)")
+        self.assertTrue(larry.is_transient_coinbase_error(exc))
+        self.assertTrue(larry.should_rebuild_coinbase_client(exc))
+
     def test_noop_target_does_not_emit_trade_decision(self):
         original_get_position = larry.get_live_net_position
         original_build_decision = larry.build_trade_decision

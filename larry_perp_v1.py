@@ -590,7 +590,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v47_progressive_leg_ladder")
+log = logging.getLogger("larry_perp_v47_1_reliability")
 
 # =============================================================================
 # UTILITIES
@@ -1269,6 +1269,21 @@ _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
 _COINBASE_CONSECUTIVE_FAILURES = 0
 _COINBASE_LAST_SUCCESS_AT: Optional[str] = None
 _COINBASE_LAST_VERIFIED_POSITION_AT: Optional[str] = None
+_GCS_OUTAGE_ACTIVE = False
+_GCS_OUTAGE_STARTED_AT: Optional[str] = None
+_GCS_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
+_GCS_CONSECUTIVE_FAILURES = 0
+_GCS_LAST_SUCCESS_AT: Optional[str] = None
+_SPOT_LAST_NONCRITICAL_WRITE_MONOTONIC = 0.0
+SPOT_STATE_CHECKPOINT_SECONDS = max(60.0, float(os.getenv("SPOT_STATE_CHECKPOINT_SECONDS", "900")))
+
+
+def is_gcs_storage_error(exc: BaseException) -> bool:
+    cmd = getattr(exc, "cmd", None)
+    if isinstance(cmd, (list, tuple)) and len(cmd) >= 2:
+        return str(cmd[0]).lower() == "gcloud" and str(cmd[1]).lower() == "storage"
+    message = str(exc).lower()
+    return "gcloud storage" in message or "gcs cycle i/o budget" in message
 
 
 def coinbase_error_status(exc: BaseException) -> Optional[int]:
@@ -1289,6 +1304,8 @@ def is_transient_coinbase_error(exc: BaseException) -> bool:
     only for Coinbase's known transient portfolio-access response. Other 403s
     remain fail-closed because they may indicate a real permission problem.
     """
+    if is_gcs_storage_error(exc):
+        return False
     status_int = coinbase_error_status(exc)
     message = str(exc).lower()
     portfolio_access_error = status_int == 403 and (
@@ -1299,7 +1316,7 @@ def is_transient_coinbase_error(exc: BaseException) -> bool:
         return True
 
     name = type(exc).__name__.lower()
-    transient_names = ("connectionerror", "timeout", "remotedisconnected")
+    transient_names = ("connectionerror", "timeout", "remotedisconnected", "sslerror", "sslzeroreturnerror")
     transient_text = (
         "bad gateway", "gateway timeout", "connection aborted",
         "remote end closed connection", "temporarily unavailable",
@@ -1310,9 +1327,13 @@ def is_transient_coinbase_error(exc: BaseException) -> bool:
 
 def should_rebuild_coinbase_client(exc: BaseException) -> bool:
     """Refresh credentials after auth or the known portfolio-scope response."""
+    if is_gcs_storage_error(exc):
+        return False
+    if is_gcs_storage_error(exc):
+        return False
     status_int = coinbase_error_status(exc)
     message = str(exc).lower()
-    return status_int == 401 or (
+    return is_transient_coinbase_error(exc) or status_int == 401 or (
         status_int == 403
         and (
             "does not have access to portfolio" in message
@@ -1553,11 +1574,11 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v47_progressive_leg_ladder",
+        "version": "larry_perp_v47_1_reliability",
         "deployment": {
-            "version": "v47",
-            "deployed_at": "2026-08-11",
-            "release": "progressive_leg_ladder",
+            "version": "v47.1",
+            "deployed_at": "2026-08-12",
+            "release": "subsystem_reliability",
         },
         "phantom": {
             "state": "MONITORING",
@@ -4265,10 +4286,22 @@ def load_spot_state(gcs: GCS) -> Dict[str, Any]:
     return st
 
 
-def save_spot_state(gcs: GCS, state: Dict[str, Any]) -> None:
+def save_spot_state(gcs: GCS, state: Dict[str, Any], critical: bool = False) -> bool:
+    global _SPOT_LAST_NONCRITICAL_WRITE_MONOTONIC
+    now = time.monotonic()
+    if not critical and _SPOT_LAST_NONCRITICAL_WRITE_MONOTONIC and now - _SPOT_LAST_NONCRITICAL_WRITE_MONOTONIC < SPOT_STATE_CHECKPOINT_SECONDS:
+        return False
     state["last_updated"] = iso_utc()
     state["source"] = "coinbase_unified_spot_engine"
-    gcs.write_json(SPOT_POSITION_STATE_BLOB, state)
+    try:
+        gcs.write_json(SPOT_POSITION_STATE_BLOB, state)
+        _SPOT_LAST_NONCRITICAL_WRITE_MONOTONIC = now
+        return True
+    except Exception as exc:
+        if critical:
+            raise
+        log.warning("Non-fatal spot-state checkpoint failure: %s", exc)
+        return False
 
 
 def place_spot_market_buy(cb: Any, quote_size: float, reason: str) -> Dict[str, Any]:
@@ -4407,7 +4440,7 @@ def maybe_handle_spot_entry(cb: Any, gcs: GCS, state: Dict[str, Any], sig: Signa
             gcs.write_json("coinbase_spot_bridge_signal.json", {"active": True, "consumed": False, "trigger": trigger, "created_at": iso_utc(), "spot_quote_size": buy_usd, "score": sig.long_score})
     else:
         spot_state["last_blocked_reason"] = order.get("error") or "Spot order failed"
-    save_spot_state(gcs, spot_state)
+    save_spot_state(gcs, spot_state, critical=bool(order.get("ok")))
     return result
 
 
@@ -5206,7 +5239,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v47_progressive_leg_ladder",
+        "version": "larry_perp_v47_1_reliability",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -5273,6 +5306,10 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
             "outage_started_at": _COINBASE_OUTAGE_STARTED_AT,
             "last_success_at": _COINBASE_LAST_SUCCESS_AT,
             "last_verified_position_at": _CYCLE_CONTEXT.get("last_verified_position_at"),
+            "gcs_status": "HEALTHY" if not _GCS_OUTAGE_ACTIVE else "DEGRADED",
+            "gcs_consecutive_failures": _GCS_CONSECUTIVE_FAILURES,
+            "gcs_outage_started_at": _GCS_OUTAGE_STARTED_AT,
+            "gcs_last_success_at": _GCS_LAST_SUCCESS_AT,
         },
         "last_trade_decision": state.get("last_trade_decision"),
         "runtime_metrics": state.get("runtime_metrics"),
@@ -5320,11 +5357,11 @@ def run_once(cb: Any, gcs: GCS) -> None:
         state = default_engine_state()
     # Persisted state survives releases; stamp the running binary identity every
     # cycle rather than inheriting the prior release's metadata indefinitely.
-    state["version"] = "larry_perp_v47_progressive_leg_ladder"
+    state["version"] = "larry_perp_v47_1_reliability"
     state["deployment"] = {
-        "version": "v47",
-        "deployed_at": "2026-08-11",
-        "release": "progressive_leg_ladder",
+        "version": "v47.1",
+        "deployed_at": "2026-08-12",
+        "release": "subsystem_reliability",
     }
 
     strategy_cfg = load_strategy_config(gcs)
@@ -5894,6 +5931,8 @@ def main() -> None:
     global _COINBASE_OUTAGE_ACTIVE, _COINBASE_OUTAGE_STARTED_AT
     global _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
     global _COINBASE_CONSECUTIVE_FAILURES, _COINBASE_LAST_SUCCESS_AT
+    global _GCS_OUTAGE_ACTIVE, _GCS_OUTAGE_STARTED_AT, _GCS_OUTAGE_LAST_ALERT_MONOTONIC
+    global _GCS_CONSECUTIVE_FAILURES, _GCS_LAST_SUCCESS_AT
     log.info("Loading Coinbase client and GCS...")
     cb = build_coinbase_client()
     gcs = GCS(BUCKET_NAME)
@@ -5934,14 +5973,47 @@ def main() -> None:
                 _COINBASE_OUTAGE_ACTIVE = False
                 _COINBASE_OUTAGE_STARTED_AT = None
                 _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
+            _GCS_LAST_SUCCESS_AT = iso_utc()
+            prior_gcs_failures = _GCS_CONSECUTIVE_FAILURES
+            _GCS_CONSECUTIVE_FAILURES = 0
+            if _GCS_OUTAGE_ACTIVE:
+                if prior_gcs_failures >= COINBASE_ALERT_AFTER_FAILURES:
+                    send_telegram_message(
+                        f"ðŸŸ¢ LARRY STATE STORAGE RECOVERED\n"
+                        f"Critical GCS state writes completed successfully.\n"
+                        f"Outage began: {_GCS_OUTAGE_STARTED_AT or 'unknown'}\n"
+                        f"Time: {et_timestamp_short()}", event_type="GCS_RECOVERED",
+                    )
+                _GCS_OUTAGE_ACTIVE = False
+                _GCS_OUTAGE_STARTED_AT = None
+                _GCS_OUTAGE_LAST_ALERT_MONOTONIC = 0.0
         except Exception as e:
             log.exception("Main loop error: %s", e)
+            storage_failure = is_gcs_storage_error(e)
             transient_coinbase = is_transient_coinbase_error(e)
             refresh_client = should_rebuild_coinbase_client(e)
             exchange_read_failure = transient_coinbase or refresh_client
             should_alert = True
-            if exchange_read_failure:
+            failure_count = 0
+            severity = "RUNTIME ERROR"
+            action = "No order was attempted; Larry will retry next cycle."
+            if storage_failure:
+                _GCS_CONSECUTIVE_FAILURES += 1
+                failure_count = _GCS_CONSECUTIVE_FAILURES
+                now_monotonic = time.monotonic()
+                if not _GCS_OUTAGE_ACTIVE:
+                    _GCS_OUTAGE_ACTIVE = True
+                    _GCS_OUTAGE_STARTED_AT = et_timestamp_short()
+                should_alert = failure_count >= COINBASE_ALERT_AFTER_FAILURES
+                if should_alert and _GCS_OUTAGE_LAST_ALERT_MONOTONIC and now_monotonic - _GCS_OUTAGE_LAST_ALERT_MONOTONIC < COINBASE_OUTAGE_ALERT_COOLDOWN_SECONDS:
+                    should_alert = False
+                if should_alert:
+                    _GCS_OUTAGE_LAST_ALERT_MONOTONIC = now_monotonic
+                severity = "STATE STORAGE DEGRADED"
+                action = "No order was attempted. Noncritical telemetry is deferred; critical state will retry next cycle."
+            elif exchange_read_failure:
                 _COINBASE_CONSECUTIVE_FAILURES += 1
+                failure_count = _COINBASE_CONSECUTIVE_FAILURES
                 now_monotonic = time.monotonic()
                 if not _COINBASE_OUTAGE_ACTIVE:
                     _COINBASE_OUTAGE_ACTIVE = True
@@ -5972,16 +6044,13 @@ def main() -> None:
             if TELEGRAM_INCLUDE_ERRORS and should_alert:
                 attempted = bool(_CYCLE_CONTEXT.get("order_attempted"))
                 managed = bool(_CYCLE_CONTEXT.get("bot_managed_position_active"))
-                action = (
-                    "Order activity occurred; verify client order ID and Coinbase position before any retry."
-                    if attempted
-                    else "No order was attempted. Larry will rebuild the client and retry next cycle."
-                )
-                severity = "CRITICAL POSITION READ" if managed else "EXCHANGE READ DEGRADED"
+                if exchange_read_failure:
+                    action = "Order activity occurred; verify Coinbase position before retry." if attempted else "No order was attempted. Larry rebuilt the Coinbase client and will retry next cycle."
+                    severity = "CRITICAL POSITION READ" if managed else "EXCHANGE READ DEGRADED"
                 send_telegram_message(
                     f"🚨 LARRY {severity}\n{type(e).__name__}: {str(e)[:500]}\n"
                     f"Phase: {_CYCLE_CONTEXT.get('phase')}\n"
-                    f"Consecutive failures: {_COINBASE_CONSECUTIVE_FAILURES}\n"
+                    f"Consecutive failures: {failure_count}\n"
                     f"Bot-managed position active: {'YES' if managed else 'NO'}\n"
                     f"Order attempted: {'YES' if attempted else 'NO'}\n"
                     f"Order status: {_CYCLE_CONTEXT.get('order_status')}\n"
@@ -6002,6 +6071,10 @@ def main() -> None:
                         "outage_started_at": _COINBASE_OUTAGE_STARTED_AT,
                         "last_success_at": _COINBASE_LAST_SUCCESS_AT,
                         "last_verified_position_at": _COINBASE_LAST_VERIFIED_POSITION_AT,
+                        "gcs_status": "DEGRADED" if storage_failure else ("DEGRADED" if _GCS_OUTAGE_ACTIVE else "HEALTHY"),
+                        "gcs_consecutive_failures": _GCS_CONSECUTIVE_FAILURES,
+                        "gcs_outage_started_at": _GCS_OUTAGE_STARTED_AT,
+                        "gcs_last_success_at": _GCS_LAST_SUCCESS_AT,
                     },
                 }
                 gcs.write_json(UNIFIED_HEARTBEAT_BLOB, err_payload)
