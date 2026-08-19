@@ -752,6 +752,30 @@ class IndependentLegTests(unittest.TestCase):
         self.assertEqual(open_legs[1]["entry_price"], 65200)
         self.assertNotEqual(open_legs[0]["firm_stop"], open_legs[1]["firm_stop"])
 
+    def test_score3_probe_arms_flat_and_confirms_on_next_closed_candle(self):
+        larry.SCORE3_PROBE_ENABLED = True
+        larry.SCORE3_PROBE_CONTRACTS = 2
+        state = larry.default_engine_state()
+        state["macro_regime"] = {"state": "NEUTRAL", "gate_open": True}
+        state["last_exchange_position"] = {"signed_contracts": 0}
+        sig = self.signal(long_score=3, short_score=0)
+        first = [{"start": 0, "close": 65000}, {"start": 100, "close": 65000}, {"start": 200, "close": 65000}]
+        self.assertIsNone(larry.update_phantom_state(state, sig, 0.0, first))
+        self.assertEqual(state["phantom"]["signal_class"], "SCORE3_PROBE")
+        self.assertEqual(state["phantom"]["locked_target_contracts"], 2)
+        second = [{"start": 100, "close": 65000}, {"start": 200, "close": 65000}, {"start": 300, "close": 65000}]
+        self.assertEqual(larry.update_phantom_state(state, sig, 0.0, second), "LONG")
+
+    def test_score3_probe_cannot_open_or_flip_when_position_exists(self):
+        larry.SCORE3_PROBE_ENABLED = True
+        state = larry.default_engine_state()
+        state["macro_regime"] = {"state": "NEUTRAL", "gate_open": True}
+        state["last_exchange_position"] = {"signed_contracts": -4}
+        sig = self.signal(long_score=3, short_score=0)
+        candles = [{"start": 0, "close": 65000}, {"start": 100, "close": 65000}, {"start": 200, "close": 65000}]
+        self.assertIsNone(larry.update_phantom_state(state, sig, 0.0, candles))
+        self.assertEqual(state["phantom"]["state"], "MONITORING")
+
 
 if __name__ == "__main__":
     unittest.main()

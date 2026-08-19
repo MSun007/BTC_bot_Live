@@ -274,6 +274,8 @@ PROGRESSIVE_ADD_ONS_ENABLED = os.getenv("PROGRESSIVE_ADD_ONS_ENABLED", "true").l
 MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = int(os.getenv("MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD", "10"))
 MAX_POSITION_ADDS = int(os.getenv("MAX_POSITION_ADDS", "3"))
 ENTRY_MIN_SCORE = int(os.getenv("ENTRY_MIN_SCORE", "4"))
+SCORE3_PROBE_ENABLED = os.getenv("SCORE3_PROBE_ENABLED", "true").lower() in ("1", "true", "yes")
+SCORE3_PROBE_CONTRACTS = int(os.getenv("SCORE3_PROBE_CONTRACTS", "2"))
 ADD_MIN_SCORE = int(os.getenv("ADD_MIN_SCORE", "4"))
 ADD_REQUIRE_PROFITABLE = os.getenv("ADD_REQUIRE_PROFITABLE", "true").lower() in ("1", "true", "yes")
 ADD_MIN_FAVORABLE_PCT = float(os.getenv("ADD_MIN_FAVORABLE_PCT", "0.0016"))
@@ -311,9 +313,9 @@ LEG_TSL_ACTIVATION_R = float(os.getenv("LEG_TSL_ACTIVATION_R", "1.25"))
 LEG_TP1_R_MULTIPLE = float(os.getenv("LEG_TP1_R_MULTIPLE", "1.0"))
 INITIAL_ENTRY_MAX_CONTRACTS = int(os.getenv("INITIAL_ENTRY_MAX_CONTRACTS", "4"))
 ADD_MAX_CONTRACTS = int(os.getenv("ADD_MAX_CONTRACTS", "2"))
-EXPECTED_CONFIG_VERSION = "v47_progressive_leg_ladder"
+EXPECTED_CONFIG_VERSION = "v48_score3_probe"
 # Filled from the canonical strategy_config.json after release construction.
-EXPECTED_CONFIG_SHA256 = "cc8022fb49b680397285d6fd2e3ed77dbbcb492acca22578ae42c4c5bef96003"
+EXPECTED_CONFIG_SHA256 = "74c1b7e69433649d320574172533cafdb474d73ab74b0195bfeca0fa2d77e026"
 DAILY_NET_LOSS_LIMIT_USD = float(os.getenv("DAILY_NET_LOSS_LIMIT_USD", "25"))
 COUNTERTREND_ENTRIES_ENABLED = os.getenv("COUNTERTREND_ENTRIES_ENABLED", "false").lower() in ("1", "true", "yes")
 NEUTRAL_REGIME_MAX_CONTRACTS = int(os.getenv("NEUTRAL_REGIME_MAX_CONTRACTS", str(CONTRACTS_PER_TRADE_PROBE)))
@@ -469,7 +471,7 @@ EMERGENCY_FLATTEN_REQUEST_BLOB = "emergency_flatten_request.json"  # v29 dashboa
 
 DEFAULT_STRATEGY_CONFIG = {
     "CONFIG_VERSION": EXPECTED_CONFIG_VERSION,
-    "CONFIG_NOTE": "v46: 4/4 cost-aware entries, strength-only pyramiding, independent core/add legs, and per-leg ATR/TP/TSL accounting.",
+    "CONFIG_NOTE": "v48: confirmed two-contract 3/4 probes while flat; 4/4 remains required for standard entries and all adds.",
     "CONTRACT_SIZE_BTC": CONTRACT_SIZE_BTC,
     "MAX_CONVICTION_CONTRACTS": MAX_CONVICTION_CONTRACTS,
     "PROBE_PCT": PROBE_PCT,
@@ -485,6 +487,8 @@ DEFAULT_STRATEGY_CONFIG = {
     "MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD": MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD,
     "MAX_POSITION_ADDS": MAX_POSITION_ADDS,
     "ENTRY_MIN_SCORE": ENTRY_MIN_SCORE,
+    "SCORE3_PROBE_ENABLED": SCORE3_PROBE_ENABLED,
+    "SCORE3_PROBE_CONTRACTS": SCORE3_PROBE_CONTRACTS,
     "ADD_MIN_SCORE": ADD_MIN_SCORE,
     "ADD_REQUIRE_PROFITABLE": ADD_REQUIRE_PROFITABLE,
     "ADD_MIN_FAVORABLE_PCT": ADD_MIN_FAVORABLE_PCT,
@@ -590,7 +594,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("larry_perp_v47_1_reliability")
+log = logging.getLogger("larry_perp_v48_score3_probe")
 
 # =============================================================================
 # UTILITIES
@@ -1004,13 +1008,13 @@ def load_strategy_config(gcs: GCS) -> Dict[str, Any]:
         "ADAPTIVE_REDUCE_SCORE", "ADAPTIVE_EXIT_SCORE", "ADAPTIVE_CONFIRM_CYCLES", "ADAPTIVE_REENTRY_COOLDOWN_MINUTES",
         "SWING_PIVOT_LEFT_BARS", "SWING_PIVOT_RIGHT_BARS",
         "NEUTRAL_REGIME_MAX_CONTRACTS",
-        "ENTRY_MIN_SCORE", "ADD_MIN_SCORE", "MAX_POSITION_ADDS", "INITIAL_ENTRY_MAX_CONTRACTS", "ADD_MAX_CONTRACTS", "PULLBACK_MAX_TARGET_CONTRACTS",
+        "ENTRY_MIN_SCORE", "SCORE3_PROBE_CONTRACTS", "ADD_MIN_SCORE", "MAX_POSITION_ADDS", "INITIAL_ENTRY_MAX_CONTRACTS", "ADD_MAX_CONTRACTS", "PULLBACK_MAX_TARGET_CONTRACTS",
     ]
     # STREAK_PAUSE_MINUTES is normalized for display only; apply_strategy_config always
     # derives the effective pause length from STREAK_PAUSE_HOURS (single source of truth,
     # see v30 fix note there) so editing only the hours field on the dashboard takes effect.
     float_keys += ["STREAK_PAUSE_HOURS", "STREAK_PAUSE_MINUTES"]
-    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED", "ADD_REQUIRE_PROFITABLE", "PULLBACK_FIRST_ADD_ENABLED", "POSITION_LEGS_ENABLED"]
+    bool_keys = ["ENABLE_CORE_PERP_ENTRIES", "ENABLE_SPOT_BRIDGE_PERP_BUYS", "ENABLE_SPOT_BTC_TRADING", "DRY_RUN", "SEND_EMAIL", "SEND_TELEGRAM", "TELEGRAM_INCLUDE_ERRORS", "TELEGRAM_DAILY_SUMMARY_ENABLED", "SEND_TRADE_EMAIL_ONLY_AFTER_CONFIRMED_FILL", "SCORE4_MACRO_OVERRIDE_ENABLED", "PROGRESSIVE_ADD_ONS_ENABLED", "SCORE3_PROBE_ENABLED", "SIGNAL_LOCK_ENABLED", "SIGNAL_COMMIT_ON_CLOSED_CANDLE", "FREEZE_CONFIDENCE_ON_ARM", "REVERSAL_PROBE_ENABLED", "CORE_SCORE4_IMMEDIATE_ENTRY", "TP1_DYNAMIC_BY_LADDER", "TP1_USE_R_MULTIPLE", "ADAPTIVE_DEFENSE_ENABLED", "ADAPTIVE_FRESH_SETUP_REQUIRED", "ADAPTIVE_REENTRY_PROBE_ONLY", "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND", "SWING_PIVOT_ENABLED", "STOP_BLOWN_SHADOW_MODE", "COUNTERTREND_ENTRIES_ENABLED", "ADD_REQUIRE_PROFITABLE", "PULLBACK_FIRST_ADD_ENABLED", "POSITION_LEGS_ENABLED"]
     for k in float_keys:
         cfg[k] = safe_float(cfg.get(k), safe_float(DEFAULT_STRATEGY_CONFIG.get(k), 0.0))
     for k in int_keys:
@@ -1041,7 +1045,7 @@ def strategy_config_integrity(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "active_sha256": actual_sha256,
         "version_match": version_match,
         "hash_match": hash_match,
-        "reason": "OK" if ok else "Live strategy configuration does not match deployed v45 policy; exits remain active but new entries/adds are blocked",
+        "reason": "OK" if ok else "Live strategy configuration does not match deployed v48 policy; exits remain active but new entries/adds are blocked",
         "checked_at": iso_utc(),
     }
 
@@ -1052,7 +1056,7 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     This keeps the current file structure stable while making parameters live
     configurable. Product IDs and exchange plumbing remain code/env controlled.
     """
-    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, ENTRY_MIN_SCORE, ADD_MIN_SCORE, ADD_REQUIRE_PROFITABLE, ADD_MIN_FAVORABLE_PCT, POSITION_SIZE_LADDER, PULLBACK_FIRST_ADD_ENABLED, PULLBACK_MAX_TARGET_CONTRACTS, PULLBACK_MAX_ADVERSE_ATR, POSITION_LEGS_ENABLED, LEG_TSL_ACTIVATION_R, LEG_TP1_R_MULTIPLE, INITIAL_ENTRY_MAX_CONTRACTS, ADD_MAX_CONTRACTS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
+    global CONTRACT_SIZE_BTC, MAX_CONVICTION_CONTRACTS, PROBE_PCT, PARTIAL_PCT, STRONG_PCT, CONTRACTS_PER_TRADE, CONTRACTS_PER_TRADE_FULL, CONTRACTS_PER_TRADE_PARTIAL, CONTRACTS_PER_TRADE_PROBE, SCORE4_MACRO_OVERRIDE_ENABLED, PROGRESSIVE_ADD_ONS_ENABLED, MACRO_BLOCKED_PROBE_CONTRACTS, MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD, MAX_POSITION_ADDS, ENTRY_MIN_SCORE, SCORE3_PROBE_ENABLED, SCORE3_PROBE_CONTRACTS, ADD_MIN_SCORE, ADD_REQUIRE_PROFITABLE, ADD_MIN_FAVORABLE_PCT, POSITION_SIZE_LADDER, PULLBACK_FIRST_ADD_ENABLED, PULLBACK_MAX_TARGET_CONTRACTS, PULLBACK_MAX_ADVERSE_ATR, POSITION_LEGS_ENABLED, LEG_TSL_ACTIVATION_R, LEG_TP1_R_MULTIPLE, INITIAL_ENTRY_MAX_CONTRACTS, ADD_MAX_CONTRACTS, SIGNAL_LOCK_ENABLED, SIGNAL_VALIDITY_MINUTES, SIGNAL_CANCEL_SCORE, SIGNAL_HYSTERESIS_ARM_SCORE, SIGNAL_COMMIT_ON_CLOSED_CANDLE, FREEZE_CONFIDENCE_ON_ARM, SIGNAL_ARM_SCORE, SIGNAL_COMMIT_SCORE, CORE_SCORE4_IMMEDIATE_ENTRY, REVERSAL_PROBE_ENABLED, REVERSAL_PROBE_CONTRACTS, REVERSAL_NEAR_BB_PCT, REVERSAL_RSI_SOFT_LONG_MAX, REVERSAL_RSI_SOFT_SHORT_MIN
     global ATR_PERIOD, ATR_MULTIPLIER, TSL_ACTIVATION_PCT, TSL_TRAIL_PCT, TP1_PCT, TP1_FRACTION, TP1_DYNAMIC_BY_LADDER, TP1_PROBE_TRIGGER_PCT, TP1_PARTIAL_TRIGGER_PCT, TP1_STRONG_TRIGGER_PCT, TP1_FULL_TRIGGER_PCT, TP1_USE_R_MULTIPLE, TP1_R_MULTIPLE, PHANTOM_EXTENSION_PCT
     global ADAPTIVE_DEFENSE_ENABLED, ADAPTIVE_REDUCE_SCORE, ADAPTIVE_EXIT_SCORE, ADAPTIVE_CONFIRM_CYCLES, ADAPTIVE_ENTRY_GRACE_MINUTES, ADAPTIVE_MIN_ADVERSE_ATR, ADAPTIVE_REENTRY_COOLDOWN_MINUTES, ADAPTIVE_FRESH_SETUP_REQUIRED, ADAPTIVE_REENTRY_PROBE_ONLY, ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND, SWING_PIVOT_ENABLED, SWING_PIVOT_LEFT_BARS, SWING_PIVOT_RIGHT_BARS, STOP_BLOWN_SHADOW_MODE
     global FUNDING_LONG_MAX, FUNDING_SHORT_MIN, FUNDING_SIZE_REDUCE_AT, DAILY_STOP_LIMIT, LOSS_STREAK_LIMIT, STREAK_PAUSE_HOURS, STREAK_PAUSE_MINUTES, DAILY_NET_LOSS_LIMIT_USD
@@ -1083,6 +1087,8 @@ def apply_strategy_config(cfg: Dict[str, Any]) -> None:
     MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD = safe_int(cfg.get("MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD"), MIN_CONFIDENCE_IMPROVEMENT_FOR_ADD)
     MAX_POSITION_ADDS = safe_int(cfg.get("MAX_POSITION_ADDS"), MAX_POSITION_ADDS)
     ENTRY_MIN_SCORE = max(1, min(4, safe_int(cfg.get("ENTRY_MIN_SCORE"), ENTRY_MIN_SCORE)))
+    SCORE3_PROBE_ENABLED = _bool_from_any(cfg.get("SCORE3_PROBE_ENABLED"), SCORE3_PROBE_ENABLED)
+    SCORE3_PROBE_CONTRACTS = max(1, min(MAX_CONVICTION_CONTRACTS, safe_int(cfg.get("SCORE3_PROBE_CONTRACTS"), SCORE3_PROBE_CONTRACTS)))
     ADD_MIN_SCORE = max(ENTRY_MIN_SCORE, min(4, safe_int(cfg.get("ADD_MIN_SCORE"), ADD_MIN_SCORE)))
     ADD_REQUIRE_PROFITABLE = _bool_from_any(cfg.get("ADD_REQUIRE_PROFITABLE"), ADD_REQUIRE_PROFITABLE)
     ADD_MIN_FAVORABLE_PCT = max(0.0, safe_float(cfg.get("ADD_MIN_FAVORABLE_PCT"), ADD_MIN_FAVORABLE_PCT))
@@ -1574,10 +1580,10 @@ def save_engine_state(gcs: GCS, state: Dict[str, Any]) -> None:
 
 def default_engine_state() -> Dict[str, Any]:
     return {
-        "version": "larry_perp_v47_1_reliability",
+        "version": "larry_perp_v48_score3_probe",
         "deployment": {
-            "version": "v47.1",
-            "deployed_at": "2026-08-12",
+            "version": "v48",
+            "deployed_at": "2026-08-19",
             "release": "subsystem_reliability",
         },
         "phantom": {
@@ -1833,6 +1839,10 @@ def build_entry_diagnostics(state: Dict[str, Any], sig: SignalSnapshot, macro: D
         "short_score": short_score,
         "signal_arm_score": arm,
         "signal_commit_score": commit,
+        "score3_probe_enabled": SCORE3_PROBE_ENABLED,
+        "score3_probe_contracts": SCORE3_PROBE_CONTRACTS,
+        "score3_probe_long_eligible": bool(SCORE3_PROBE_ENABLED and sig.long_score == 3),
+        "score3_probe_short_eligible": bool(SCORE3_PROBE_ENABLED and sig.short_score == 3),
         "long_conditions": long_conditions,
         "short_conditions": short_conditions,
         "long_missing": long_missing,
@@ -1958,6 +1968,7 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
             return None
 
         is_reversal_probe = bool(phantom.get("is_reversal_probe") or phantom.get("signal_class") == "REVERSAL_PROBE")
+        is_score3_probe = phantom.get("signal_class") == "SCORE3_PROBE"
 
         # v19 safety/alignment: do not let a CORE phantom stay armed/committed
         # if the sizing engine would produce target 0. This was confusing on
@@ -2008,7 +2019,7 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
             # A 2/4 core setup may ARM, but the later candle is an execution
             # commitment and must still meet the configured 3/4 commit bar.
             evidence_ok = active_score(direction) >= (
-                SIGNAL_ARM_SCORE if is_reversal_probe else SIGNAL_COMMIT_SCORE
+                SIGNAL_ARM_SCORE if is_reversal_probe else 3 if is_score3_probe else SIGNAL_COMMIT_SCORE
             )
             if is_reversal_probe and not evidence_ok:
                 rp_dir, rp_score, rp_reason = reversal_probe_candidate(sig)
@@ -2073,6 +2084,7 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
     state["reversal_probe_diagnostics"] = _rp_diag
 
     macro_open_now = bool((state.get("macro_regime") or {}).get("gate_open"))
+    flat_now = safe_int((state.get("last_exchange_position") or {}).get("signed_contracts"), 0) == 0
 
     if long_score >= SIGNAL_ARM_SCORE and long_score >= short_score:
         macro_allowed, macro_reason = macro_allows_core_direction("LONG", state.get("macro_regime") or {})
@@ -2083,8 +2095,8 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
         else:
             core_decision = sizing_decision_for_signal("LONG", long_score, funding_rate, macro_open_now) if 'sizing_decision_for_signal' in globals() else {}
             core_target = safe_int(core_decision.get("target_abs_contracts"), 0)
-            if core_target > 0:
-                candidate, candidate_score, candidate_class = "LONG", long_score, "CORE"
+            if (long_score >= ENTRY_MIN_SCORE and core_target > 0) or (flat_now and SCORE3_PROBE_ENABLED and long_score == 3):
+                candidate, candidate_score, candidate_class = "LONG", long_score, "SCORE3_PROBE" if flat_now and SCORE3_PROBE_ENABLED and long_score == 3 else "CORE"
             elif rp_dir == "LONG":
                 candidate, candidate_score, candidate_class = "LONG", rp_score, "REVERSAL_PROBE"
                 state.setdefault("last_blocked_action", {})["core_long"] = "Core LONG blocked by macro/target=0; using qualified reversal probe path"
@@ -2092,8 +2104,8 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
                 state.setdefault("last_blocked_action", {})["core_long"] = "Core LONG blocked by macro/target=0; no qualified reversal probe"
     elif short_score >= SIGNAL_ARM_SCORE:
         macro_allowed, macro_reason = macro_allows_core_direction("SHORT", state.get("macro_regime") or {})
-        if macro_allowed:
-            candidate, candidate_score, candidate_class = "SHORT", short_score, "CORE"
+        if macro_allowed and (short_score >= ENTRY_MIN_SCORE or (flat_now and SCORE3_PROBE_ENABLED and short_score == 3)):
+            candidate, candidate_score, candidate_class = "SHORT", short_score, "SCORE3_PROBE" if flat_now and SCORE3_PROBE_ENABLED and short_score == 3 else "CORE"
         else:
             state.setdefault("last_blocked_action", {})["core_short_macro"] = macro_reason
     elif rp_dir:
@@ -2125,6 +2137,12 @@ def update_phantom_state(state: Dict[str, Any], sig: SignalSnapshot, funding_rat
         decision["target_abs_contracts"] = probe_contracts
         decision["final_contracts"] = probe_contracts
         decision["reason"] = "authoritative_reversal_probe_cap"
+    elif candidate_class == "SCORE3_PROBE":
+        probe_contracts = max(1, min(SCORE3_PROBE_CONTRACTS, MAX_CONVICTION_CONTRACTS))
+        decision = dict(decision)
+        decision["target_abs_contracts"] = probe_contracts
+        decision["final_contracts"] = probe_contracts
+        decision["reason"] = "score3_probe_cap"
 
     # Score-4 core setup: do not make it jump through phantom if enabled. This matches operator expectation:
     # all 4 long/short triggers = committed entry, subject to risk/portfolio guards in caller.
@@ -5239,7 +5257,7 @@ def build_dashboard_engine_state(state: Dict[str, Any], sig: SignalSnapshot, liv
     short_funding_ok, short_funding_reason = funding_allows("SHORT", funding)
     return {
         **state,
-        "version": "larry_perp_v47_1_reliability",
+        "version": "larry_perp_v48_score3_probe",
         "strategy_config": state.get("active_strategy_config", {}),
         "product_id": PERP_PRODUCT_ID,
         "contract_size_btc": CONTRACT_SIZE_BTC,
@@ -5357,10 +5375,10 @@ def run_once(cb: Any, gcs: GCS) -> None:
         state = default_engine_state()
     # Persisted state survives releases; stamp the running binary identity every
     # cycle rather than inheriting the prior release's metadata indefinitely.
-    state["version"] = "larry_perp_v47_1_reliability"
+    state["version"] = "larry_perp_v48_score3_probe"
     state["deployment"] = {
-        "version": "v47.1",
-        "deployed_at": "2026-08-12",
+        "version": "v48",
+        "deployed_at": "2026-08-19",
         "release": "subsystem_reliability",
     }
 
@@ -5714,6 +5732,13 @@ def run_once(cb: Any, gcs: GCS) -> None:
                             sizing_decision["target_abs_contracts"] = reversal_cap
                             sizing_decision["final_contracts"] = reversal_cap
                             sizing_decision["reason"] = "authoritative_reversal_probe_cap"
+                        elif _locked_class == "SCORE3_PROBE":
+                            score3_cap = max(1, min(SCORE3_PROBE_CONTRACTS, MAX_CONVICTION_CONTRACTS))
+                            target = clamp_target((1 if confirmed == "LONG" else -1) * score3_cap)
+                            sizing_decision["score3_probe_cap"] = True
+                            sizing_decision["target_abs_contracts"] = score3_cap
+                            sizing_decision["final_contracts"] = score3_cap
+                            sizing_decision["reason"] = "score3_probe_cap"
                         _adaptive_guard = state.get("adaptive_reentry_guard") or {}
                         _guarded_reentry = bool(
                             _adaptive_guard.get("active")
@@ -5775,13 +5800,13 @@ def run_once(cb: Any, gcs: GCS) -> None:
                         if not add_ok:
                             ok = False
                             guard_reason = add_reason
-                        if safe_int(live_now.get("signed_contracts"), 0) == 0 and _score < ENTRY_MIN_SCORE:
+                        if safe_int(live_now.get("signed_contracts"), 0) == 0 and _score < ENTRY_MIN_SCORE and _locked_class != "SCORE3_PROBE":
                             ok = False
                             guard_reason = f"entry_conviction_below_v46_minimum_{_score}/{ENTRY_MIN_SCORE}"
                         state["last_portfolio_guard"] = {"ok": ok, "reason": guard_reason, **guard}
                         _setup_id = (state.get("phantom") or {}).get("setup_id")
                         if ok:
-                            core_reason = f"REVERSAL_PROBE_{confirmed}_PHANTOM_CONFIRMED" if _locked_class == "REVERSAL_PROBE" else f"CORE_IAF_{confirmed}_PHANTOM_CONFIRMED"
+                            core_reason = f"REVERSAL_PROBE_{confirmed}_PHANTOM_CONFIRMED" if _locked_class == "REVERSAL_PROBE" else f"SCORE3_PROBE_{confirmed}_CANDLE_CONFIRMED" if _locked_class == "SCORE3_PROBE" else f"CORE_IAF_{confirmed}_PHANTOM_CONFIRMED"
                             _CYCLE_CONTEXT.setdefault("decision_context", {}).update({
                                 "direction": confirmed,
                                 "active_score": _score,

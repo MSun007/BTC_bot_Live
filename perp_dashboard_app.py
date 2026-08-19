@@ -210,7 +210,7 @@ GCS_SPOT_STATE = f"{BUCKET_PREFIX}/coinbase_spot_position_state.json"
 GCS_SPOT_TRADES = f"{BUCKET_PREFIX}/coinbase_spot_trades_log.csv"
 GCS_PERP_STATE = f"{BUCKET_PREFIX}/perp_engine_state.json"
 DASHBOARD_VERSION = "v46"
-DASHBOARD_DEPLOYED_AT = "2026-08-10"
+DASHBOARD_DEPLOYED_AT = "2026-08-19"
 GCS_PERP_TRADES = f"{BUCKET_PREFIX}/coinbase_perp_trades_log.csv"
 GCS_PERP_TRADES_LEDGER = f"{BUCKET_PREFIX}/perp_trades_ledger_v47.csv"  # v47 clean track-record ledger
 GCS_MANUAL_POSITION_EVENTS = f"{BUCKET_PREFIX}/manual_position_events.csv"
@@ -236,6 +236,8 @@ DEFAULT_CONFIG = {
     "CONTRACTS_PER_TRADE_FULL": 10,
     "CONTRACTS_PER_TRADE_PARTIAL": 4,
     "CONTRACTS_PER_TRADE_PROBE": 2,
+    "SCORE3_PROBE_ENABLED": True,
+    "SCORE3_PROBE_CONTRACTS": 2,
     "SCORE4_MACRO_OVERRIDE_ENABLED": True,
     "MACRO_BLOCKED_PROBE_CONTRACTS": 2,
     "TP1_PCT": 0.0075,
@@ -1142,6 +1144,8 @@ def load_config() -> Dict[str, Any]:
         "CONTRACTS_PER_TRADE_FULL": ["CONTRACTS_PER_TRADE_FULL"],
         "CONTRACTS_PER_TRADE_PARTIAL": ["CONTRACTS_PER_TRADE_PARTIAL"],
         "CONTRACTS_PER_TRADE_PROBE": ["CONTRACTS_PER_TRADE_PROBE"],
+        "SCORE3_PROBE_ENABLED": ["SCORE3_PROBE_ENABLED"],
+        "SCORE3_PROBE_CONTRACTS": ["SCORE3_PROBE_CONTRACTS"],
         "SCORE4_MACRO_OVERRIDE_ENABLED": ["SCORE4_MACRO_OVERRIDE_ENABLED"],
         "MACRO_BLOCKED_PROBE_CONTRACTS": ["MACRO_BLOCKED_PROBE_CONTRACTS"],
         "TP1_PCT": ["TP1_PCT"],
@@ -1196,7 +1200,7 @@ def load_config() -> Dict[str, Any]:
     # Normalize common numeric fields.
     for k in ["CONTRACT_SIZE_BTC", "ATR_STOP_MULTIPLIER", "TSL_ACTIVATION_PCT", "TSL_TRAIL_PCT", "PHANTOM_EXTENSION_PCT", "FUNDING_LONG_MAX", "FUNDING_SHORT_MIN", "FUNDING_SIZE_REDUCE_AT", "TP1_PCT", "TP1_FRACTION", "MAX_EFFECTIVE_LEVERAGE", "MIN_FUTURES_EQUITY_BUFFER_USD", "RSI_BUY_FLOOR", "RSI_BUY_THRESHOLD", "BB_STD", "VOLUME_MULTIPLIER", "STOCH_RSI_THRESHOLD", "PULLBACK_MAX_ADVERSE_ATR"]:
         cfg[k] = safe_float(cfg.get(k), DEFAULT_CONFIG[k])
-    for k in ["MAX_CONVICTION_CONTRACTS", "CONTRACTS_PER_TRADE", "CONTRACTS_PER_TRADE_FULL", "CONTRACTS_PER_TRADE_PARTIAL", "CONTRACTS_PER_TRADE_PROBE", "MACRO_BLOCKED_PROBE_CONTRACTS", "RSI_PERIOD", "BB_PERIOD", "VOLUME_AVG_PERIOD", "STOCH_RSI_PERIOD", "ATR_PERIOD", "SPOT_MAX_LADDER_UNITS", "PERP_STRATEGY_SLOTS", "DAILY_STOP_LIMIT", "LOSS_STREAK_LIMIT", "STREAK_PAUSE_HOURS", "SPOT_ENTRY_COOLDOWN_SEC", "PERP_ENTRY_COOLDOWN_SEC", "BRIDGE_ENTRY_COOLDOWN_SEC", "MAX_POSITION_ADDS", "PULLBACK_MAX_TARGET_CONTRACTS"]:
+    for k in ["MAX_CONVICTION_CONTRACTS", "CONTRACTS_PER_TRADE", "CONTRACTS_PER_TRADE_FULL", "CONTRACTS_PER_TRADE_PARTIAL", "CONTRACTS_PER_TRADE_PROBE", "SCORE3_PROBE_CONTRACTS", "MACRO_BLOCKED_PROBE_CONTRACTS", "RSI_PERIOD", "BB_PERIOD", "VOLUME_AVG_PERIOD", "STOCH_RSI_PERIOD", "ATR_PERIOD", "SPOT_MAX_LADDER_UNITS", "PERP_STRATEGY_SLOTS", "DAILY_STOP_LIMIT", "LOSS_STREAK_LIMIT", "STREAK_PAUSE_HOURS", "SPOT_ENTRY_COOLDOWN_SEC", "PERP_ENTRY_COOLDOWN_SEC", "BRIDGE_ENTRY_COOLDOWN_SEC", "MAX_POSITION_ADDS", "PULLBACK_MAX_TARGET_CONTRACTS"]:
         cfg[k] = safe_int(cfg.get(k), DEFAULT_CONFIG[k])
     if isinstance(cfg.get("SPOT_TRANCHE_TARGETS_PCT"), str):
         cfg["SPOT_TRANCHE_TARGETS_PCT"] = [safe_float(x, 0) for x in cfg["SPOT_TRANCHE_TARGETS_PCT"].replace(";", ",").split(",") if str(x).strip()]
@@ -1206,6 +1210,7 @@ def load_config() -> Dict[str, Any]:
         cfg["POSITION_SIZE_LADDER"] = list(DEFAULT_CONFIG["POSITION_SIZE_LADDER"])
     cfg["POSITION_SIZE_LADDER"] = sorted({safe_int(x, 0) for x in cfg["POSITION_SIZE_LADDER"] if safe_int(x, 0) > 0})
     cfg["PULLBACK_FIRST_ADD_ENABLED"] = str(cfg.get("PULLBACK_FIRST_ADD_ENABLED", True)).lower() in ("1", "true", "yes", "on")
+    cfg["SCORE3_PROBE_ENABLED"] = str(cfg.get("SCORE3_PROBE_ENABLED", True)).lower() in ("1", "true", "yes", "on")
     return cfg
 
 
@@ -3916,7 +3921,7 @@ button,input,select{font-family:inherit}
     <div class="v12-card"><div class="v12-title">Opportunity Meter</div><div class="v12-val" id="oppLevel">—</div><div class="opp-meter" id="oppMeter"><div class="opp-dot"></div><div class="opp-dot"></div><div class="opp-dot"></div><div class="opp-dot"></div></div><div class="v12-note" id="oppNote">Raw setup quality before live order checks.</div></div>
     <div class="v12-card"><div class="v12-title">LONG Setup Checklist</div><div class="v12-val" id="diagLongStatus">—</div><div class="v12-note" id="diagLongMissing">—</div></div>
     <div class="v12-card"><div class="v12-title">SHORT Setup Checklist</div><div class="v12-val" id="diagShortStatus">—</div><div class="v12-note" id="diagShortMissing">—</div></div>
-    <div class="v12-card"><div class="v12-title">Reversal Probe</div><div class="v12-val" id="diagProbeStatus">—</div><div class="v12-note" id="diagProbeReason">—</div></div>
+    <div class="v12-card"><div class="v12-title">3/4 Entry Probe</div><div class="v12-val" id="diagProbeStatus">—</div><div class="v12-note" id="diagProbeReason">—</div></div>
     <div class="v12-card"><div class="v12-title">Macro / Funding</div><div class="v12-val" id="diagGates">—</div><div class="v12-note" id="diagGatesNote">—</div></div>
     <div class="v12-card"><div class="v12-title">Next Possible Action</div><div class="v12-val" id="diagNextAction">—</div><div class="v12-note" id="diagNextNote">—</div></div>
   </div>
@@ -3941,7 +3946,7 @@ button,input,select{font-family:inherit}
 <section class="card span6"><h2>Open Perp Exposure</h2><div class="table-wrap"><table class="table"><thead><tr><th>Side</th><th>Contracts</th><th>BTC Exp.</th><th>Avg Entry</th><th>Mark</th><th>Book Unrealized</th><th>Cost Basis</th></tr></thead><tbody id="perpPosBody"></tbody></table></div></section>
 <section class="card span4 diagnostic-card"><h2>Legacy Clean Strategy Book <span class="method-badge">diagnostic</span></h2><div class="kv"><span class="k">Book avg entry</span><span class="v" id="bookAvg">—</span></div><div class="kv"><span class="k">Book open contracts</span><span class="v" id="bookContracts">—</span></div><div class="kv"><span class="k">Book unrealized P&L</span><span class="v" id="bookUnr">—</span></div><div class="kv"><span class="k">Closed P&L since reset</span><span class="v" id="realizedReset">—</span></div><div class="kv"><span class="k">Fees since tracking reset</span><span class="v" id="feesReset">—</span></div><div class="kv"><span class="k">Net book impact</span><span class="v" id="netBookImpact">—</span></div><div class="kv"><span class="k">New fills counted</span><span class="v" id="fillCount">—</span></div><div class="kv"><span class="k">Old fills ignored</span><span class="v" id="ignoredFillCount">—</span></div><div class="kv"><span class="k">Fee audit</span><span class="v"><a href="/api/fee_audit" target="_blank">Open</a></span></div><div class="pnl-note" id="tradePnlNote">—</div></section>
 <section class="card span6"><h2>Position Reconciler / Phantom Protection</h2><div class="metric-row" style="grid-template-columns:repeat(2,1fr)"><div class="metric"><div class="label">Reconciler Status</div><div class="val" id="recStatus">—</div><div class="mini" id="recDetail">—</div></div><div class="metric"><div class="label">Target / Drift</div><div class="val" id="recOpening">—</div><div class="mini">Target exposure vs live Coinbase</div></div></div><div class="kv"><span class="k">Exchange net position</span><span class="v" id="recExchange">—</span></div><div class="kv"><span class="k">Local bot legs</span><span class="v" id="recBotLegs">—</span></div><div class="kv"><span class="k">Signed net contracts</span><span class="v" id="recSigned">—</span></div><div class="pnl-note" id="recSafeRule">—</div></section>
-<section class="card span12"><h2>Independent Position Legs</h2><div class="pnl-note" id="legSummary">Loading core/add reconciliation…</div><div class="leg-grid" id="positionLegGrid"></div><div class="version-note" id="deploymentVersion">Dashboard v47.1 · deployed 2026-08-12</div></section>
+<section class="card span12"><h2>Independent Position Legs</h2><div class="pnl-note" id="legSummary">Loading core/add reconciliation…</div><div class="leg-grid" id="positionLegGrid"></div><div class="version-note" id="deploymentVersion">Dashboard v48 · prepared 2026-08-19</div></section>
 <section class="card span6"><h2>Execution Quality <span class="method-badge">Larry ledger · costs & slippage</span></h2><div class="metric-row"><div class="metric"><div class="label">Avg Slippage</div><div class="val" id="execAvgSlip">—</div><div class="mini" id="execSlipRange">Best / worst —</div></div><div class="metric"><div class="label">Maker / Taker</div><div class="val" id="execMakerTaker">—</div><div class="mini" id="execMakerTakerNote">Larry orders</div></div><div class="metric"><div class="label">Fees Paid</div><div class="val" id="execFeesPaid">—</div><div class="mini">From Larry ledger</div></div><div class="metric"><div class="label">Execution Score</div><div class="val" id="execScore">—</div><div class="mini" id="execScoreNote">Preliminary</div></div></div><div class="pnl-note" id="execQualityNote">Execution quality summarizes Larry trade fills. Current market IOC orders should appear mostly/all taker.</div></section>
 <section class="card span4 diagnostic-card"><h2>Signal History <span class="method-badge">diagnostic</span></h2><div id="sigHistory" class="mini">—</div></section>
 <section class="card span12 diagnostic-card"><h2>Detailed Accounting / Reference <span class="method-badge">diagnostic</span></h2><div class="table-wrap"><table class="table"><thead><tr><th>Book</th><th>Current Value / Basis</th><th>Clean Realized</th><th>Clean Unrealized</th><th>Funding</th><th>Fees</th><th>Notes</th></tr></thead><tbody id="acctBody"></tbody></table></div><div class="pnl-note">Clean performance uses the live Coinbase basis for the current position and post-reset fills. Coinbase exchange-native daily realized P&L is shown as a reference only and is not included in clean P&L or return on capital.</div></section>
@@ -4055,7 +4060,7 @@ function renderPositionLegs(d){
  const ok=book.reconciled===true, money=v=>Number.isFinite(Number(v))?'$'+Number(v).toLocaleString(undefined,{maximumFractionDigits:2}):'--';
  summary.textContent=`${ok?'RECONCILED':'DRIFT - NEW RISK BLOCKED'} | Internal ${book.internal_signed_contracts??0} / Coinbase ${book.exchange_signed_contracts??0} contracts`;
  grid.innerHTML=legs.length?legs.map((l,i)=>{const kind=String(l.kind||'LEG'), side=String(l.side||'--'), cls=kind==='CORE'?'core':'add'; return `<div class="leg-card ${cls}"><div class="leg-head"><div class="leg-name">${kind} ${i+1} | ${side} ${l.remaining_contracts}</div><div class="leg-badge">${l.tsl_active?'TSL ACTIVE':'PROTECTED'}</div></div><div class="leg-kv"><span>Entry</span><span>${money(l.entry_price)}</span><span>Open P&amp;L</span><span>${money(l.unrealized_pnl_usd)}</span><span>Entry conviction</span><span>${l.entry_score||'--'}/4 | ${l.entry_confidence_pct||'--'}%</span><span>Firm 1.5x ATR stop</span><span>${money(l.firm_stop)}</span><span>TP1 (${Number(cfg.LEG_TP1_R_MULTIPLE||1.25).toFixed(2)}R)</span><span>${money(l.tp1_trigger)}${l.tp1_done?' | taken':''}</span><span>TSL activation</span><span>${money(l.tsl_activation)}</span><span>TSL stop</span><span>${money(l.tsl_stop)}</span><span>Fees allocated</span><span>${money(l.allocated_fees_usd)}</span></div></div>`}).join(''):'<div class="tm-empty">No open Larry legs.</div>';
- const dep=es.deployment||{}, versionText=`Dashboard v47.1 | deployed 2026-08-12 | Engine ${dep.version||es.version||'--'}${dep.deployed_at?' | '+dep.deployed_at:''}`;
+  const dep=es.deployment||{}, versionText=`Dashboard v48 | prepared 2026-08-19 | Engine ${dep.version||es.version||'--'}${dep.deployed_at?' | '+dep.deployed_at:''}`;
  set('deploymentVersion',versionText);
  let versionPill=$('deploymentVersionPill');
  if(!versionPill){versionPill=document.createElement('span');versionPill.id='deploymentVersionPill';versionPill.className='pill purple';document.querySelector('header .pill-row')?.prepend(versionPill)}
@@ -4716,7 +4721,7 @@ function renderLarryMindset(d){
 }
 
 function renderEntryDiagnostics(d){
- const es=d.engine_state||{}; const diag=es.entry_diagnostics || es.last_entry_diagnostics || d.entry_diagnostics || {}; const rp=es.last_reversal_probe_check||{};
+  const es=d.engine_state||{}; const cfg=d.config||d.strategy_config||{}; const diag=es.entry_diagnostics || es.last_entry_diagnostics || d.entry_diagnostics || {}; const rp=es.last_reversal_probe_check||{};
  if(!diag || Object.keys(diag).length===0){
    set('diagScores','No diagnostics yet'); setClass('diagScores','v12-val warn');
    set('diagScoreNote','Deploy clean v19 bot or wait one cycle.');
@@ -4729,9 +4734,12 @@ function renderEntryDiagnostics(d){
  set('diagLongMissing',`${condList(diag.long_conditions)} · Need +${diag.core_long_arm_gap ?? '—'} to arm / +${diag.core_long_commit_gap ?? '—'} to commit`);
  set('diagShortStatus', ss>=arm?'Can arm':'Waiting'); setClass('diagShortStatus','v12-val '+(ss>=arm?'good':'warn'));
  set('diagShortMissing',`${condList(diag.short_conditions)} · Need +${diag.core_short_arm_gap ?? '—'} to arm / +${diag.core_short_commit_gap ?? '—'} to commit`);
- const prDir=diag.reversal_probe_direction || rp.direction || null;
- set('diagProbeStatus', prDir?`${prDir} probe can arm`:'Not qualified'); setClass('diagProbeStatus','v12-val '+(prDir?'good':'warn'));
- set('diagProbeReason', (diag.reversal_probe_reason || rp.reason || '—').slice(0,260));
+  const prDir=diag.reversal_probe_direction || rp.direction || null;
+  const score3Enabled=diag.score3_probe_enabled ?? cfg.SCORE3_PROBE_ENABLED ?? false;
+  const score3Size=Number(diag.score3_probe_contracts || cfg.SCORE3_PROBE_CONTRACTS || 2);
+  const score3Dir=diag.score3_probe_long_eligible?'LONG':diag.score3_probe_short_eligible?'SHORT':null;
+  set('diagProbeStatus',!score3Enabled?'Disabled':score3Dir?`${score3Dir} 3/4 probe eligible`:`Waiting for aligned 3/4`); setClass('diagProbeStatus','v12-val '+(score3Dir?'good':'warn'));
+  set('diagProbeReason', score3Enabled?`${score3Size} contract · next distinct closed candle must remain at least 3/4 · 4/4 required for standard entry/add`:'3/4 entry probes are disabled');
  const macroOpen=diag.macro_gate_open===true; const longFund=diag.funding_long_ok!==false; const shortFund=diag.funding_short_ok!==false;
  set('diagGates',`${macroOpen?'Macro open':'Macro blocked'} · F:${longFund&&shortFund?'OK':'Check'}`); setClass('diagGates','v12-val '+(macroOpen?'good':'warn'));
  set('diagGatesNote',`${diag.macro_reason||''} · Long funding: ${diag.funding_long_reason||'OK'} · Short funding: ${diag.funding_short_reason||'OK'}`.slice(0,260));
