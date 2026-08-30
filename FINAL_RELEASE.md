@@ -29,6 +29,10 @@ The parent archive also contains `cloud_backup/gcs_full`, which preserves all 10
 
 Larry was intentionally shut down after repeated GCS write timeouts and Coinbase TLS EOF errors. Alerts stated that no bot-managed position was active and no order was attempted. The final GCS state, position state, ledgers, heartbeats, configuration, and signal logs were downloaded before the VM was stopped. A Compute Engine disk snapshot was also created to preserve files that could not be read over the unresponsive SSH path.
 
+- Snapshot: `btc-perp-bot-final-v48-20260830` (`READY`)
+- VM stopped: `2026-08-30T10:36:53.923-07:00`
+- Final archive/documentation commit: `9661a48` on GitHub `main`
+
 ## Safe redeployment checklist
 
 1. Create a fresh Python environment and install the pinned dependencies in `requirements.txt`.
