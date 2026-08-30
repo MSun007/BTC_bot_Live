@@ -22,9 +22,9 @@ Deployed: 2026-08-19
 
 ## Deployment status
 
-- GitHub production commit: `03ef9d0` on `main`.
-- VM: `btc-perp-bot` in `us-west1-b`; engine `larry_perp_v48_score3_probe` active under `larry-perp.service`.
+- GitHub production commit: `5d46f85f224de58ed42b6bcf259a38b21c31cf12` on `main` (`03ef9d0` introduced the strategy behavior; `5d46f85` finalized production metadata).
+- VM: `btc-perp-bot` in `us-west1-b`; engine `larry_perp_v48_score3_probe` was shut down and the VM was stopped on 2026-08-30 after the final archive was created.
 - VM backup: `/home/msunderji/larry_perp_v1.py.backup_pre_v48_20260819_1500`.
 - GCS config backup: `gs://btc_trade_log/backups/strategy_config_pre_v48_20260819_1500.json`.
-- Cloud Run: `perp-bot-dashboard-00177-dhm`, serving 100% traffic in `us-east1`.
-- Post-deployment checks: flat position, config version/hash matched, Coinbase healthy, GCS healthy, risk gate open, kill switch off, live heartbeat, `DRY_RUN=false`.
+- Final Cloud Run deployment: `perp-bot-dashboard-00179-bmp`, built from commit `5d46f85f224de58ed42b6bcf259a38b21c31cf12` and serving 100% traffic in `us-east1` at archive time.
+- Final incident state: no bot-managed position and no order attempted. Repeated GCS write timeouts and Coinbase TLS EOF errors caused degraded-state alerts; this archive preserves the last durable state and logs for diagnosis.

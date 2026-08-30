@@ -8,6 +8,8 @@ The current production engine is:
 larry_perp_v48_score3_probe
 ```
 
+**Final archived release:** v48.0-final (2026-08-30). This is the verified source used by the final Compute Engine/Cloud Run deployment. See `FINAL_RELEASE.md` for provenance, deployment requirements, shutdown status, and handoff notes.
+
 > This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
 
 ## System overview
@@ -32,6 +34,8 @@ Coinbase futures positions are netted. Larry therefore trades toward a **target 
 | `test_adaptive_risk.py` | Regression tests for adaptive risk, pivots, re-anchoring and ATR-stop priority |
 | `Dockerfile` | Cloud Run dashboard container definition |
 | `requirements.txt` | Dashboard runtime dependencies |
+| `VERSION` | Human-readable distribution version |
+| `FINAL_RELEASE.md` | Final-release provenance, archive contents, and redeployment checklist |
 
 ## Entry and conviction model
 
