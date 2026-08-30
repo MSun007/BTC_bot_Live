@@ -31,7 +31,7 @@ Larry was intentionally shut down after repeated GCS write timeouts and Coinbase
 
 - Snapshot: `btc-perp-bot-final-v48-20260830` (`READY`)
 - VM stopped: `2026-08-30T10:36:53.923-07:00`
-- Final archive/documentation commit: `9661a48` on GitHub `main`
+- Final archive documentation begins at commit `9661a48` on GitHub `main`; later commits only record shutdown metadata.
 
 ## Safe redeployment checklist
 
