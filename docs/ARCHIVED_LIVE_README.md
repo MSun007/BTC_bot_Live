@@ -1,0 +1,623 @@
+> Historical live-system documentation. Larry is now PAPER ONLY. These archived instructions are not the current deployment runbook. See the repository README and docs/PAPER_RUNBOOK.md.
+
+# Larry BTC Perpetual Futures Bot
+
+Larry is a live Coinbase BTC perpetual-futures trading system with conviction-based position sizing, exchange-reconciled risk controls, adaptive loss management, profit protection, market-structure analysis, and a mobile-friendly operations dashboard.
+
+The current production engine is:
+
+```text
+larry_perp_v48_score3_probe
+```
+
+**Final archived release:** v48.0-final (2026-08-30). This is the verified source used by the final Compute Engine/Cloud Run deployment. See `FINAL_RELEASE.md` for provenance, deployment requirements, shutdown status, and handoff notes.
+
+> This repository controls a live trading system. Test and review every behavioral change before deployment. Never assume that a successful code deployment means the bot is authorized to trade: the kill switch, exchange position, configuration and service health must all be checked independently.
+
+## System overview
+
+Larry separates the trading process into five layers:
+
+1. **Observe:** calculate indicators, macro regime, funding conditions and confirmed swing structure.
+2. **Qualify:** score long and short opportunities and progress them through the phantom-signal lifecycle.
+3. **Size:** translate conviction into a target net position, then apply exposure and leverage safeguards.
+4. **Manage:** protect an open position with a firm ATR stop, adaptive defence, profit taking and a trailing stop.
+5. **Reconcile:** treat Coinbase as the source of truth after every order and publish the resulting state to the dashboard.
+
+Coinbase futures positions are netted. Larry therefore trades toward a **target net exposure** rather than sending blind buy or sell tickets.
+
+## Repository files
+
+| File | Purpose |
+|---|---|
+| `larry_perp_v1.py` | Production trading engine running on the Compute Engine VM |
+| `perp_dashboard_app.py` | Flask dashboard deployed to Cloud Run |
+| `strategy_config.json` | Live strategy defaults and operator-controlled thresholds |
+| `test_adaptive_risk.py` | Regression tests for adaptive risk, pivots, re-anchoring and ATR-stop priority |
+| `Dockerfile` | Cloud Run dashboard container definition |
+| `requirements.txt` | Dashboard runtime dependencies |
+| `VERSION` | Human-readable distribution version |
+| `FINAL_RELEASE.md` | Final-release provenance, archive contents, and redeployment checklist |
+
+## Entry and conviction model
+
+Larry scores long and short conditions using RSI, stochastic RSI, Bollinger Bands and volume participation. Signals move through a stateful lifecycle rather than executing from a single transient reading.
+
+Typical lifecycle:
+
+```text
+MONITORING → PHANTOM_ARMED → CLOSED-CANDLE CONFIRMATION → COMMITTED ENTRY
+```
+
+Position size scales with conviction. The effective ladder is derived from `MAX_CONVICTION_CONTRACTS` and the configured probe, partial and strong percentages. `MAX_CONVICTION_CONTRACTS` is the sole absolute contract limit; the portfolio leverage guard may resize a target lower when account equity cannot safely support it.
+
+Progressive additions trade toward a higher target size only when confidence improves. They are not repeated identical orders.
+
+### v45 entry-integrity controls
+
+- A core 2/4 setup may arm, but only a later distinct closed candle that still scores at least 3/4 can commit an order.
+- The initial entry's confidence and target size become the baseline for additions. An add requires the configured confidence improvement and remains subject to the one-add live limit.
+- Entry sizing may hold, add, or reverse; it cannot reduce a same-side position. Profit-taking and risk management exclusively own reductions.
+- New countertrend entries and adds are blocked: bullish macro blocks shorts, bearish macro blocks longs, and neutral conditions are capped at probe size.
+- The engine validates the live GCS configuration version and canonical SHA-256. A mismatch blocks new entries/adds while firm stops and all position protection remain active.
+
+## Position anchoring and resizing
+
+Coinbase is the source of truth for the live position quantity and average entry price.
+
+Each unique combination of signed contracts and exchange average creates a new **position version**. When Larry detects a new version it records:
+
+- Signed contract quantity
+- Coinbase-confirmed average entry
+- Locked ATR
+- Previous and new position fingerprints
+- Re-anchoring timestamp
+- Verification status
+
+Trailing stops and high/low watermarks are owned by a specific position version. A fresh entry, direction flip, or changed Coinbase average clears the prior trailing state. A same-side quantity-only reduction preserves a valid trailing stop and transfers its ownership to the new version.
+
+Position-event rules:
+
+- **Fresh entry:** initialize all controls from the confirmed exchange position.
+- **Same-direction increase:** re-anchor to the blended average and restart trailing state.
+- **Partial reduction:** synchronize the remaining position without treating it as a new entry thesis.
+- **Direction flip:** treat the resulting exposure as a new position.
+- **Manual/external change:** in `monitor_only` mode, Larry displays the position but will not modify it.
+
+## Risk and exit architecture
+
+### Firm ATR stop
+
+The non-negotiable protective stop remains:
+
+```text
+LONG stop  = average entry − locked ATR × 1.5
+SHORT stop = average entry + locked ATR × 1.5
+```
+
+ATR is locked when the current position version is established. The firm ATR stop always takes priority over adaptive-defence logic.
+
+### Adaptive defence
+
+Adaptive defence looks for converging evidence that an open-position thesis is deteriorating before the firm ATR stop is reached.
+
+The current evidence model can score:
+
+| Evidence | Points |
+|---|---:|
+| Adverse momentum across recent candles | 20 |
+| Adverse momentum accelerating | 10 |
+| Adverse candle with elevated volume | 20 |
+| Break of the relevant confirmed swing pivot | 35 |
+| Price on the unfavorable side of the Bollinger middle band | 10 |
+| Adverse RSI regime | 10 |
+
+The score is capped at 100.
+
+Current live actions:
+
+| Score/state | Response |
+|---|---|
+| Below 75 | `HOLD` |
+| 75–84 for three distinct closed candles | Reduce one conviction rung |
+| 85+ for three distinct closed candles | Exit the position |
+| Firm ATR stop crossed | Exit immediately |
+
+Ordinary adaptive defence also requires the position to be at least 20 minutes
+old and at least 0.50 locked ATR adverse. During that grace period, only the
+existing structure-break plus adverse-volume emergency can qualify. The firm
+1.5 ATR stop remains active immediately.
+
+An adaptive reduction or exit creates a 15-minute minimum re-entry cooldown.
+Beginning with v35, elapsed time is not sufficient to authorize the same side
+again. Larry latches a same-side re-entry guard that requires:
+
+1. The old directional score to fall to the signal-cancel threshold.
+2. Structure to stop being adverse or price to reclaim the Bollinger middle band.
+3. A new phantom setup whose arm timestamp is later than the signal-clear event.
+4. The first qualified retry to use probe size only.
+
+This prevents a persistent oversold or overbought reading from being recycled as
+a supposedly fresh setup every time the cooldown expires. Opposite-side setups
+remain eligible under their normal gates.
+
+Adaptive defence can only reduce or close an existing position. It cannot independently open or reverse a trade.
+
+After one adaptive reduction, a latch prevents repeated cascade reductions from the same deterioration episode. The latch clears only after recovery; an 85+ confirmed exit remains available. Quantity-only reductions preserve the original adaptive entry time and evidence baseline rather than restarting the grace period.
+
+### Fee-complete loss governor
+
+Every confirmed Larry order contributes its actual economic impact to the daily risk umbrella: realized gross P&L minus fees. Entry/add commissions therefore count immediately, and losing adaptive reductions count toward the loss streak even though their reason does not contain the word `STOP`. New entries halt at the configured daily net-loss limit; open-position exits remain active.
+
+### R-based profit taking
+
+TP1 is based on the trade's defined risk rather than an unrelated fixed percentage:
+
+```text
+1R = distance from average entry to the firm ATR stop
+TP1 distance = 0.75R
+```
+
+At TP1, Larry steps the position down to the next lower conviction rung instead of necessarily flattening it. This preserves a runner while improving the relationship between typical gains and losses.
+
+Legacy percentage TP settings remain available for compatibility and can be restored by disabling `TP1_USE_R_MULTIPLE`.
+
+### Trailing stop
+
+The trailing stop activates only after the configured favorable move. Once active, it follows the best observed price using the configured trail percentage.
+
+The watermark is cleared after a same-direction position increase so a larger position cannot inherit an obsolete trailing stop.
+
+## Swing-pivot classifier
+
+Larry detects confirmed, non-repainting swing highs and lows. The newest incomplete candle is excluded, and a pivot must have the configured number of completed bars on both sides.
+
+Structure classifications include:
+
+- `BULLISH_HH_HL`: higher high and higher low
+- `BEARISH_LH_LL`: lower high and lower low
+- `RANGE_OR_TRANSITION`: mixed or overlapping structure
+- `UNCLASSIFIED`: insufficient confirmed structure
+
+The dashboard displays the latest confirmed swing high, swing low and classification.
+
+Pivot structure is currently **shadow/informational**. A confirmed structural break may contribute to adaptive defence, but the pivot classifier cannot independently enter, reverse or re-enter a position.
+
+## Post-stop classifier
+
+After a qualifying full stop or adaptive exit, Larry can observe how price behaves around the exit anchor.
+
+| State | Interpretation |
+|---|---|
+| `FISHED` | Price crossed the anchor and reclaimed it; possible liquidity sweep or headfake |
+| `SAVED` | Price continued beyond the anchor; the stop protected against a real continuation |
+| `EXTREME` | Price extended unusually far beyond the stop envelope |
+| `UNCLEAR` | No recovery or continuation signature dominates |
+| `BURNED` | Repeated same-direction FISHED events suggest that side is being hunted |
+
+The post-stop system is currently **shadow-only**:
+
+- It publishes scores to the dashboard.
+- It records repeated same-side FISHED observations.
+- Three recent same-side FISHED observations can produce a full BURNED score.
+- It cannot place a re-entry order.
+
+Automatic FISHED re-entry should remain disabled until the shadow dataset is large enough to evaluate expectancy, false-reentry cost and regime dependence.
+
+## Dashboard
+
+The Cloud Run dashboard is designed for desktop and mobile operation. The Position Authority panel leads with the most important operational fact:
+
+- `AUTO-MANAGED`: Larry has verified ownership and may execute exits and adjustments.
+- `NOT MANAGED`: Larry can display calculated levels but will not submit orders for the position.
+- `FLAT`: Coinbase reports no open futures position.
+- `UNVERIFIED`: Coinbase did not confirm the position; the dashboard must not infer that the account is flat.
+
+The Larry Decision Pipeline displays:
+
+- Macro, funding and risk gates
+- Long and short trigger scores
+- Signal lifecycle and conviction tier
+- Current and target position size
+- ATR, TP and trailing-stop progress
+- Adaptive-defence score, state and evidence
+- Position version and verified exchange anchor
+- Confirmed swing structure and pivot levels
+- Post-stop state and shadow scores
+
+The dashboard also provides Larry-only performance accounting, benchmark comparison, trade maps, realized P&L, drawdown, execution diagnostics, configuration visibility and emergency controls.
+
+## v44 observability and Coinbase reliability
+
+v44 is an operational release. It does **not** change entry thresholds, conviction sizing, leverage limits, profit targets, ATR stops, trailing stops, Adaptive Defence thresholds, manual-position ownership rules or emergency-flatten behavior.
+
+Before every actual order, Larry now creates one structured `TRADE_DECISION` record containing the current and target position, action and quantity, signal scores, macro and funding context, risk controls, Adaptive Defence state and evidence. The same decision identifier and context flow into journal logs, engine state, trade-ledger metadata and trade notifications. No-op target plans do not create trade decisions.
+
+Coinbase read handling is bounded and fail-closed:
+
+- Read-only 408/425/429/5xx and network failures receive at most two short attempts.
+- The exact Coinbase `User does not have access to portfolio` 403 response receives the same bounded read-only retry and causes the client to be rebuilt for the next cycle.
+- A 401 is not retried with the same client; the client is rebuilt for the next cycle.
+- Unrelated 403 responses are not classified as transient.
+- Order submissions are never automatically retried.
+- The first exchange-read outage cycle is logged without Telegram noise; alerts begin after consecutive failures and are cooldown-deduplicated.
+- A Coinbase failure during process startup no longer terminates the service. Larry enters the normal loop with the position marked unverified and remains fail-closed until reconciliation succeeds.
+
+The dashboard exposes live position-read health. Only a successful Coinbase futures-position response may produce `POSITION FLAT`. A failed response produces `POSITION UNVERIFIED`, an operator warning and an unavailable-position row instead of silently converting the error to an empty/flat position.
+
+GCS missing-object handling is limited to `gcloud storage cat` reads of new state/log partitions. Failed write/copy commands are never suppressed as missing-file conditions.
+
+### v44.1 decision-contract hotfix
+
+v44.1 completes the notification contract that v44 only partially implemented.
+Every actual order now creates one canonical decision record containing trade
+intent, execution and signal reasons, current/target positions, explicit order
+requirement, confidence and threshold, long/short scores, Adaptive Defence,
+macro/funding, ATR/TSL, position age/grace and expected post-trade position.
+
+The searchable journal line exposes the same fields. Email renders the full
+decision and remaining protection. Telegram remains compact but uses a typed
+heading and explicit `Reason`, `Order`, `Position`, `Fill`, `Net realized` and
+`Remaining` lines. Regression tests assert the decision schema and Telegram
+message contract. The hotfix changes reporting only; trading logic is unchanged.
+
+## Manual positions and ownership
+
+The production default is:
+
+```text
+MANUAL_POSITION_MODE=monitor_only
+```
+
+In this mode, Larry will not place exits, additions, flips or flattening trades against an unverified manual/external position. If Coinbase exposure diverges from Larry's recorded bot-managed exposure, the dashboard identifies the position as monitor-only.
+
+Ownership recovery fails closed. A matching historical ledger row is supporting evidence but is not sufficient by itself. Recovery requires the prior persisted cycle to have already classified the position as bot-managed, with matching signed quantity, product and Coinbase average-entry fingerprint. If continuity cannot be proven, the position remains monitor-only.
+
+## Order execution safety
+
+The engine:
+
+- Generates collision-resistant client order IDs.
+- Validates Coinbase responses rather than treating every non-exception as success.
+- Reconciles orders against the resulting live exchange position.
+- Distinguishes confirmed, partial, rejected, unknown and mismatched outcomes.
+- Uses actual exchange position change as the filled amount.
+- Suppresses trade confirmation messages when an acknowledged order produces no confirmed position change.
+- Records requested versus filled contracts and execution status.
+- Retries transient GCS writes with bounded exponential backoff.
+
+When an order outcome is ambiguous, verify Coinbase position and client order ID before manually retrying.
+
+## Safety controls
+
+### Kill switch
+
+`gs://btc_trade_log/bot_halt.json` is checked before normal order placement. When `halt=true`, telemetry continues but Larry submits no further orders, including automated exits. An existing position remains open until it is handled in Coinbase or through the separate Emergency Close Futures workflow.
+
+Emergency flatten requests are signed, claimed through generation-matched writes and executed by the VM bot. A stuck in-progress request can be safely reconciled after restart.
+
+Never clear a halt merely because a deployment succeeded. Confirm the exchange position, service health and intended trading status first.
+
+### Daily and streak guards
+
+Larry tracks daily stop hits, consecutive-loss state and pause windows. A profitable TP step resets the prior losing streak. Daily state resets on the next UTC trading date.
+
+### Funding and macro gates
+
+Funding can block or reduce position size when carrying cost becomes adverse. The macro regime provides an additional trend-alignment gate and can restrict full-size signals.
+
+## Important configuration
+
+The production defaults live in `strategy_config.json`. The bot merges the stored GCS configuration over code defaults each cycle.
+
+Key v35 settings:
+
+```json
+{
+  "ATR_STOP_MULTIPLIER": 1.5,
+  "MAX_CONVICTION_CONTRACTS": 20,
+  "TP1_USE_R_MULTIPLE": true,
+  "TP1_R_MULTIPLE": 0.75,
+  "ADAPTIVE_DEFENSE_ENABLED": true,
+  "ADAPTIVE_REDUCE_SCORE": 65,
+  "ADAPTIVE_EXIT_SCORE": 85,
+  "ADAPTIVE_CONFIRM_CYCLES": 2,
+  "ADAPTIVE_REENTRY_COOLDOWN_MINUTES": 15,
+  "ADAPTIVE_FRESH_SETUP_REQUIRED": true,
+  "ADAPTIVE_REENTRY_PROBE_ONLY": true,
+  "ADAPTIVE_REENTRY_REQUIRE_STRUCTURE_OR_MID_BAND": true,
+  "SWING_PIVOT_ENABLED": true,
+  "SWING_PIVOT_LEFT_BARS": 2,
+  "SWING_PIVOT_RIGHT_BARS": 2,
+  "STOP_BLOWN_SHADOW_MODE": true
+}
+```
+
+Do not change several major exit thresholds simultaneously. Make one controlled change, preserve the prior configuration and measure the resulting expectancy, average win/loss, drawdown, MAE/MFE and fee impact.
+
+## Data and state
+
+Primary GCS objects include:
+
+```text
+gs://btc_trade_log/perp_engine_state.json
+gs://btc_trade_log/perp_position_state.json
+gs://btc_trade_log/perp_trades_ledger.csv
+gs://btc_trade_log/strategy_config.json
+gs://btc_trade_log/bot_halt.json
+gs://btc_trade_log/coinbase_unified_heartbeat.json
+```
+
+Coinbase remains authoritative for live exposure. GCS state supports orchestration, telemetry, recovery and dashboard display; it must not override a conflicting live exchange position.
+
+### Bounded GCS outage behavior
+
+Critical CLI-backed reads retry once before returning their fail-closed
+default, and writes retain bounded retry/backoff. Individual CLI calls are
+limited to 30 seconds. Startup heartbeat writes are fail-soft so telemetry
+latency cannot terminate Larry.
+
+The shared per-cycle GCS cap is disabled in production. It was introduced in
+v36 and removed in v39 after live VM measurements showed that normal aggregate
+latency across many separate `gcloud storage` calls could exhaust the cap and
+prevent `perp_engine_state.json` from being saved. The main loop still records
+cadence overruns, while each individual storage command remains bounded.
+
+## Testing
+
+Run the regression suite:
+
+```bash
+python -m unittest -v test_adaptive_risk.py
+```
+
+The current tests verify:
+
+- ATR-stop priority over adaptive reduction
+- Position-version changes after quantity/average changes
+- R-based TP calculation from locked ATR
+- Confirmed pivots exclude the newest incomplete bar
+- Adaptive reduction targets a lower ladder rung
+- BURNED scoring recognizes repeated same-side FISHED observations
+- Max Conviction is the sole absolute contract clamp
+- Position management requires a matching exchange ownership fingerprint
+- Ledger recovery fails closed without prior bot-managed continuity
+- Adaptive exits require the old same-side signal to clear
+- Pre-clear phantom setups cannot be reused after recovery
+- The first fresh same-side retry is probe-only
+- Opposite-side setups are not blocked by the same-side guard
+- Critical GCS reads retry after a transient failure
+- Exhausted GCS cycle budgets fail fast
+- Known portfolio-access 403 failures are bounded/retryable for reads
+- Unrelated 403 failures remain fail-closed
+- No-op target plans do not emit trade-decision records
+
+Also run syntax checks before deployment:
+
+```bash
+python -m py_compile larry_perp_v1.py perp_dashboard_app.py
+```
+
+## Deployment and verification
+
+The dashboard is deployed to Cloud Run from the trusted GitHub `main` branch. The trading engine runs separately on the production Compute Engine VM as `larry-perp.service`.
+
+A complete release must update **both** surfaces.
+
+Recommended sequence:
+
+1. Confirm Coinbase and the dashboard show Larry flat, or deliberately halt trading.
+2. Back up the current local production files.
+3. Run syntax and regression tests.
+4. Commit and push reviewed changes to `main`.
+5. Confirm the new Cloud Run revision becomes healthy.
+6. Back up the VM's current `larry_perp_v1.py`.
+7. Install the tested commit on the VM and restart `larry-perp.service`.
+8. Confirm the service is active and startup reconciliation matches Coinbase.
+9. Confirm `perp_engine_state.json` reports the intended engine version.
+10. Test the dashboard at desktop and mobile widths.
+11. Verify the kill switch separately; do not silently clear it.
+
+Production verification should include:
+
+```text
+Service: active
+Engine: larry_perp_v44_observability_reliability
+Exchange position: expected side and quantity
+Dashboard feed: current
+Cloud Run revision: healthy
+Kill switch: explicitly understood
+```
+
+## Backup and maintenance policy
+
+Before changing production files:
+
+- Preserve the current local files in a timestamped `LIVE PLATFORM/backup_*` directory.
+- Keep the newest approved source files directly in `LIVE PLATFORM`.
+- Preserve a timestamped copy of the VM engine before replacement.
+- Keep commits focused and use the commit hash to identify the deployed release.
+- Never overwrite unexplained local changes without reviewing them.
+
+After each material strategy change, update this README, configuration notes, tests and dashboard labels together.
+
+## Current production release
+
+### v47 progressive position-leg ladder — August 11, 2026
+
+Larry keeps an internal lot-level risk book even though Coinbase exposes one
+netted futures position. An existing live position is migrated once as the CORE
+leg using the exchange average and the locked ATR already present in engine state.
+Every later ADD receives its own immutable entry, ATR, 1.5x ATR firm stop, TP1,
+TSL activation/high-water mark, remaining quantity, fees and realized/open P&L.
+
+Entry and scaling rules:
+
+- a new core entry requires a fresh 4/4 closed-candle confirmation;
+- initial entries are exactly capped at the first four-contract rung;
+- total exposure follows `4 -> 6 -> 10 -> 15 -> 20`, with at most one rung
+  added per decision cycle and 20 contracts as the absolute cap;
+- every add requires a fresh same-side 4/4 closed-candle setup;
+- the first `4 -> 6` add may occur on a pullback only while the score remains
+  4/4 and adverse movement is no more than 0.35 locked ATR;
+- later adds require the existing position to be profitable after estimated
+  trading costs and may not use the pullback exception;
+- each leg takes TP1 at 1.0R, arms its TSL at 1.25R, and retains a 1.5 ATR firm stop;
+- internal signed leg quantity must equal Coinbase signed quantity or all new
+  entries/adds fail closed while protective monitoring remains visible.
+
+The dashboard includes a responsive Independent Position Legs panel and displays
+the dashboard/engine version and deployment date. The durable per-leg audit log is
+`gs://btc_trade_log/perp_position_legs_ledger.csv`.
+
+The exchange remains the authority for total contracts and fills. Internal legs
+are Larry's risk/accounting allocation and must always reconcile to that net total.
+
+Track-record inception was `2026-08-11T16:25:57Z`, verified flat, with a
+manual $2,000 baseline and zero Larry P&L. New trades use
+`gs://btc_trade_log/perp_trades_ledger_v47.csv`; the prior ledger is preserved
+as a pre-inception archive. Strategy parameters should remain frozen for the
+8-12 week measurement window except for versioned safety, execution, or
+data-integrity fixes.
+
+Production deployment:
+
+- Release commits: `a345beaa0d3d3af5617788dddfa9698211aa6171` and metadata follow-up `fa754ae733de121d4e89a181a65c5823addf9dcc`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine/dashboard: v47
+- Exchange position at inception: `FLAT 0`
+- Regression suite: 48 tests
+- VM engine backup: `/home/msunderji/larry_perp_v1.py.backup_pre_v47_20260811_1221`
+- GCS config backup: `gs://btc_trade_log/backups/strategy_config_pre_v47_20260811_1221.json`
+
+
+The v44 release adds structured trade-decision observability and bounded,
+fail-closed Coinbase read resilience without changing Larry's strategy
+thresholds, sizing, stops, profit targets or ownership rules. The dashboard now
+distinguishes a verified flat position from an unavailable Coinbase position
+read and displays `POSITION UNVERIFIED` instead of silently inferring flat.
+
+Production deployment (August 7, 2026):
+
+- Release commit: `117a39afb0fe75cd8488e3a4b0bad00b620470e8`
+- Cloud Run revision: `perp-bot-dashboard-00152-cmd` serving 100% traffic in `us-east1`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v44_observability_reliability`
+- Exchange position immediately before deployment, at startup and after the first cycle: `FLAT 0`
+- Coinbase API health after the first cycle: `HEALTHY`, five successful read calls, zero consecutive failures
+- First completed cycle: healthy at `2026-08-07T10:58:23Z`; no error and no order attempted
+- VM/GitHub engine SHA-256: `34fad927567efa8ec94951cc5e9516734ec3d2cba90c899203edced9e2c6d228`
+- Regression suite: 32 tests passed locally
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v44_20260807_0656`
+- Local backup: `LIVE PLATFORM/backup_pre_v44_observability_reliability_20260807_064808`
+- Operational note: the first full cycle took 113 seconds versus the 60-second target; the prior v43 process was also overrunning (96 seconds immediately before restart). This is being monitored as an existing runtime-latency condition, not treated as a successful timing target.
+
+### Prior v43 release
+
+The v43 release is a conservative fee-control trial based on the 229-order
+ledger review. The audit correctly identified that entry and add fees were
+missing from the displayed realized-net total, but entry-reason rows do not
+contain the eventual P&L of the position they opened. Therefore v43 does not
+apply the proposed adaptive 90/90 change or claim a historical counterfactual
+profit. It makes only directly defensible, reversible frequency changes:
+
+- Reversal probes are disabled; fully qualified core signals remain active.
+- One genuine same-side extension is allowed per position.
+- That extension requires at least 25 percentage points of confidence
+  improvement.
+- Fresh entries and reversals no longer consume the add allowance, and flat
+  resets it for the next position.
+- The directional entry cooldown is 900 seconds and is reapplied from live
+  configuration every cycle rather than remaining stuck at a persisted value.
+- Adaptive defence remains at score 75 to reduce and 85 to exit, with v42's
+  three confirmations, 20-minute grace and 0.50 ATR adverse gate.
+- TP1, TSL and the firm 1.5 ATR stop are unchanged.
+
+Production deployment (July 24, 2026):
+
+- Release commit: `e6fd10d`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v43_fee_control_integrity`
+- Exchange position before, during and after deployment: `FLAT 0`
+- First completed cycle: healthy at 17:13:06 UTC; no order attempted
+- Effective persisted cooldown after state save: 900 seconds
+- Regression suite: 29 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v43_20260724_1308`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v43_20260724_1308.json`
+- Local backup: `LIVE PLATFORM/backup_pre_fee_control_integrity_20260724_1308`
+
+### Prior v42 release
+
+The v42 release corrects the premature trailing-stop exit observed after the
+July 24 short-to-long reversal. The new long had inherited the prior short's
+profitable low watermark and trailing-stop state, allowing a stop belonging to
+the old position to close the new one.
+
+- Every TSL now carries `tsl_position_version`.
+- Reversal, fresh-entry and changed-average events clear the old TSL and
+  watermark before the new position is managed.
+- Same-side partial reductions preserve a valid TSL and reassign it to the new
+  quantity version.
+- Exit evaluation ignores a TSL whose owner version does not match the current
+  position.
+- Adaptive reduction now requires score 75, three confirmations, 20 minutes of
+  position age and 0.50 ATR adverse excursion.
+- The firm 1.5 ATR stop and the structure-plus-volume grace-period emergency
+  remain unchanged.
+
+Production deployment (July 24, 2026):
+
+- Release commit: `abfef18`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v42_tsl_position_ownership`
+- Exchange position before, during and after deployment: `FLAT 0`
+- First completed cycle: healthy at 14:56:36 UTC; no order attempted
+- Regression suite: 25 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v42_20260724_1053`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v42_20260724_1053.json`
+- Local backup: `LIVE PLATFORM/backup_pre_tsl_position_ownership_20260724_1048`
+
+### Prior v41 release
+
+The v41 adaptive-entry guard retains the v40 Coinbase/GCS resilience and
+corrects fee-heavy defensive reductions immediately after entry:
+
+- Ordinary adaptive defence waits 10 minutes and at least 0.25 ATR of adverse
+  post-entry movement. The firm 1.5 ATR stop remains active immediately.
+- During the grace period, only a confirmed structure break combined with
+  adverse volume expansion can qualify as an emergency.
+- Entry-time evidence is baselined so pre-entry conditions alone cannot
+  immediately invalidate the accepted setup.
+- The first adaptive cut halves exposure (`4 -> 2`) instead of jumping directly
+  from the lowest conviction rung to the one-contract runner (`4 -> 1`).
+- `REVERSAL_PROBE_CONTRACTS` is authoritative on both signal lock and execution;
+  the current production setting is two contracts.
+
+Production deployment (July 24, 2026):
+
+- Release commit: `a4b0723`
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v41_adaptive_entry_guard`
+- Exchange position at deployment: existing `SHORT 1`; reconciled without an order
+- First completed cycle: healthy; dashboard state saved and normal TSL activated
+- Regression suite: 21 tests passed locally and in Cloud Shell
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v41_20260724_0906`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v41_20260724_0905.json`
+
+The v35 fresh-setup guard preserves the v34 ownership, re-anchoring, ATR,
+profit-taking and adaptive-defence improvements while fixing the churn path
+introduced by the time-only adaptive re-entry cooldown.
+
+v35 production baseline:
+
+- Release commit: `4c9a02a`
+- Cloud Run dashboard revision: `perp-bot-dashboard-00135-tbk` (100% traffic)
+- Engine service: `larry-perp.service` active on `btc-perp-bot`
+- Engine state: `larry_perp_v35_fresh_setup_guard`
+- Exchange position at deployment and verification: `FLAT`
+- Same-side signal clear: mandatory
+- Recovery evidence: mandatory
+- New post-clear phantom setup: mandatory
+- First retry sizing: probe only
+- Previous VM engine: `/home/msunderji/larry_perp_v1.py.backup_pre_v35_20260723_1024`
+- Previous GCS configuration: `gs://btc_trade_log/backups/strategy_config_pre_v35_20260723_1024.json`
