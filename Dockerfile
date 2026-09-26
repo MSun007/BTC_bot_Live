@@ -1,7 +1,6 @@
 # Dashboard container for Cloud Run (auto-deploy from GitHub).
-# Builds ONLY perp_dashboard_app.py — the trading engine (larry_perp_v1.py)
-# is deliberately not copied in, so the public-facing dashboard image never
-# contains engine code.
+# Includes the dashboard and its paper adapters. The trading engine
+# (larry_perp_v1.py) is deliberately not copied into this image.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
@@ -13,7 +12,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY perp_dashboard_app.py .
+COPY perp_dashboard_app.py paper_dashboard.py paper_account.py paper_runtime.py paper_watchdog.py paper_health.py paper_profile.py ./
 
 # Cloud Run injects $PORT (default 8080). A SINGLE gunicorn worker is intentional:
 # the dashboard keeps per-process in-memory state (login rate-limiter, data cache),

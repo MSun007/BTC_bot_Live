@@ -2316,6 +2316,7 @@ def perp_position_risk_state(positions: List[Dict[str, Any]], cfg: Dict[str, Any
     manual_mode = str(cfg.get("MANUAL_POSITION_MODE") or "monitor_only")
     bot_managed = bool(manual_status.get("bot_managed")) and bool(manual_status.get("allow_bot_to_trade_position"))
     effective_management_mode = "auto_managed" if bot_managed else manual_mode
+    positions = [p for p in positions if abs(safe_float(p.get("contracts", p.get("number_of_contracts")), 0)) > 0]
     if not positions:
         return {
             "has_position": False,
@@ -4492,7 +4493,8 @@ function drawPnlBarChart(canvas, rows, opts){
 }
 
 function renderTradeMap(d){ const range=__tradeMapRange||'1M'; const priceCanvas=$('tradeMapPriceCanvas'), pnlCanvas=$('tradeMapPnlCanvas'); if(!priceCanvas||!pnlCanvas) return; const pricesRaw=selectTradeMapPrices(d,range); const trades=selectTradeMapTrades(d,range); const pricePts=pricesRaw.map(p=>({t:p.t,y:p.price,label:p.label})); const scale=drawLineChart(priceCanvas,pricePts,{range,valueFormat:'usd',valuePrefix:'$'}); const ctx=priceCanvas.getContext('2d'); __tradeMapMarkers=[]; if(scale && trades.length){ trades.forEach(r=>{ const k=tradeKind(r); const px = r.fill || (pricePts.length?pricePts.reduce((best,p)=>Math.abs(p.t-r.t)<Math.abs(best.t-r.t)?p:best,pricePts[0]).y:0); if(!px) return; const x=scale.x(Math.max(scale.xmin,Math.min(scale.xmax,r.t))); const y=scale.y(Math.max(scale.ymin,Math.min(scale.ymax,px))); let color='rgba(148,163,184,.95)'; if(k.kind==='buy') color='rgba(34,197,94,.98)'; else if(k.kind==='tp') color='rgba(245,158,11,.98)'; else if(k.kind==='stop') color='rgba(239,68,68,.98)'; ctx.fillStyle=color; ctx.strokeStyle='rgba(2,6,23,.95)'; ctx.lineWidth=2; ctx.beginPath(); if(k.kind==='buy'){ ctx.moveTo(x,y-8); ctx.lineTo(x-7,y+7); ctx.lineTo(x+7,y+7); } else if(k.kind==='stop'){ ctx.moveTo(x,y+8); ctx.lineTo(x-7,y-7); ctx.lineTo(x+7,y-7); } else { ctx.arc(x,y,7,0,Math.PI*2); } ctx.closePath(); ctx.fill(); ctx.stroke(); __tradeMapMarkers.push({x,y,r,k,px}); }); }
- const realizedRows=trades.filter(r=>r.ok && r.strategy_net_impact_usd!==null && r.strategy_net_impact_usd!==undefined);
+ const cashEvents=(d.larry_trade_accounting||{}).cash_events;
+ const realizedRows=(cashEvents ? cashEvents.filter(r=>parseTimeMs(r.timestamp)>=tradeMapCutoff(range)) : trades).filter(r=>r.ok && r.strategy_net_impact_usd!==null && r.strategy_net_impact_usd!==undefined);
  const pnlChart=drawPnlBarChart(pnlCanvas,realizedRows,{range,valueFormat:'usd',valuePrefix:'$'});
  const visibleNet=realizedRows.reduce((a,r)=>a+Number(r.strategy_net_impact_usd||0),0);
  // v79: express Larry's range P&L as a % return on baseline so it is directly comparable
@@ -4532,7 +4534,7 @@ function renderEquityCurve(d){
  const canvas=$('equityCurveCanvas'); if(!canvas) return;
  const base=Number((d.capital||{}).starting_combined_capital||0);
  const la=d.larry_trade_accounting||{};
- const rows=(la.trade_map_trades||la.all_trades||la.recent_trades||[])
+ const rows=(la.cash_events||la.trade_map_trades||la.all_trades||la.recent_trades||[])
    .filter(r=>r.ok && r.strategy_net_impact_usd!==null && r.strategy_net_impact_usd!==undefined)
    .map(r=>({t:parseTimeMs(r.timestamp), net:Number(r.strategy_net_impact_usd||0)}))
    .filter(r=>r.t).sort((a,b)=>a.t-b.t);
@@ -5006,6 +5008,10 @@ refresh(); setInterval(refresh,12000);
 @app.route("/")
 def index():
     return render_template_string(HTML)
+
+from paper_dashboard import install_dashboard
+import sys as _paper_sys
+install_dashboard(_paper_sys.modules[__name__])
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")), debug=False)

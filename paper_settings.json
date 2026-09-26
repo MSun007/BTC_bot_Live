@@ -1,0 +1,9 @@
+{
+  "slippage_bps": 1.0,
+  "fee_bps": 6.0,
+  "fee_per_contract": 0.12,
+  "fee_basis": "historical_live_fills",
+  "current_account_tier_verified": false,
+  "fee_source": "Exact fit to Larry's last 12 archived live fills, August 7-11 2026: notional * 0.0006 + contracts * 0.12. Explicit paper assumption, not a current account quote.",
+  "funding_method": "Hourly boundary, last observed live rate and mark; unresolved gaps block new cycles"
+}

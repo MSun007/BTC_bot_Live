@@ -4731,6 +4731,10 @@ def should_allow_progressive_add(state: Dict[str, Any], current_signed: int, tar
     book = state.get("position_legs") or {}
     if POSITION_LEGS_ENABLED and not book.get("reconciled", False):
         return False, "position_leg_reconciliation_drift_blocks_new_risk"
+    # An initial entry has already passed the entry signal gates. Add-only
+    # conviction/profitability checks require an existing same-side position.
+    if current_signed == 0:
+        return True, "initial_entry_not_an_add"
     active_score = safe_int(
         decision.get("score"),
         safe_int((_CYCLE_CONTEXT.get("decision_context") or {}).get("active_score"), 0),
@@ -5952,6 +5956,14 @@ def startup_live_position(cb: Any) -> Dict[str, Any]:
         }
 
 
+def PaperStoreFactory(bucket):
+    raise RuntimeError("Paper runtime has not been installed")
+
+
+def publish_paper_status():
+    raise RuntimeError("Paper runtime has not been installed")
+
+
 def main() -> None:
     global _COINBASE_OUTAGE_ACTIVE, _COINBASE_OUTAGE_STARTED_AT
     global _COINBASE_OUTAGE_LAST_ALERT_MONOTONIC
@@ -5960,7 +5972,7 @@ def main() -> None:
     global _GCS_CONSECUTIVE_FAILURES, _GCS_LAST_SUCCESS_AT
     log.info("Loading Coinbase client and GCS...")
     cb = build_coinbase_client()
-    gcs = GCS(BUCKET_NAME)
+    gcs = PaperStoreFactory(BUCKET_NAME)
 
     # Startup verification: live exchange state is source of truth.
     live = startup_live_position(cb)
@@ -6085,7 +6097,7 @@ def main() -> None:
                 )
             try:
                 # Write a DOWN/ERROR-ish heartbeat while service is still alive.
-                gcs = GCS(BUCKET_NAME)
+                gcs = PaperStoreFactory(BUCKET_NAME)
                 gcs.begin_cycle_budget(10.0)
                 err_payload = {
                     "ts": iso_utc(), "status": "ERROR", "state": "ERROR",
@@ -6104,6 +6116,7 @@ def main() -> None:
                 }
                 gcs.write_json(UNIFIED_HEARTBEAT_BLOB, err_payload)
                 gcs.write_json(LEGACY_HEARTBEAT_BLOB, err_payload)
+                publish_paper_status()
             except Exception:
                 pass
         cycle_elapsed = time.monotonic() - cycle_started
@@ -6117,6 +6130,10 @@ def main() -> None:
             )
         time.sleep(sleep_seconds)
 
+
+from paper_runtime import install_engine
+import sys as _paper_sys
+install_engine(_paper_sys.modules[__name__])
 
 if __name__ == "__main__":
     main()

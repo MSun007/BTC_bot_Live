@@ -1,3 +1,5 @@
+> Historical live-system documentation. Larry is now PAPER ONLY. These archived instructions are not the current deployment runbook. See the repository README and docs/PAPER_RUNBOOK.md.
+
 # Larry v48 — Confirmed 3/4 Entry Probe
 
 Deployed: 2026-08-19

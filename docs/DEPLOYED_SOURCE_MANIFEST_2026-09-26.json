@@ -1,0 +1,14 @@
+{
+  "larry_perp_v1.py": "8c76504fee2d6a7844aeb149799aac903791fa2e88309da2abdfaa4ab611b06a",
+  "perp_dashboard_app.py": "912b34aceeee6f0acaa8984ebcc77e5b5d562ce673bb50df4632b99d67ea6a6c",
+  "paper_account.py": "18081745b357cd05718893a301c1b2c87796a082269b0db37602b331ce00653b",
+  "paper_runtime.py": "63aa0a73dfc840d0a79e0bd378c2b35c4481c2b7ead3b08aa0e3af17caf589c9",
+  "paper_dashboard.py": "2d6080f06f8b2838fd0ca326cc97dac15369b0956e59c11bb209692b0ca9109a",
+  "paper_watchdog.py": "24729443d48bccd88f0e971120133e1e5e5c3bad37f698dffd9504069949e565",
+  "paper_settings.json": "1acc6011d9a157dd6c6703491467ba817e52b4616493d71211f4d77e096dfd94",
+  "strategy_config.json": "04cee8e80bb83c1564de4c1bbc550315b4d6ef71cbea2c03bfd0dede90e4b607",
+  "requirements.txt": "4eb46f6e29ff9f66bf3c9bd59b18c43b5f827c9f5c6ee04fa2c4cb08282affc3",
+  "test_adaptive_risk.py": "d1494910f6bb6323e8e6fe6f87b422e1bb3c2c91d3228d3b64589c17870105fe",
+  "test_paper_account.py": "59d382f3e6334dd9500ef316380113dc1188119e101531e1473c0b0c07e81265",
+  "test_paper_integration.py": "aa25c506a9aaa30d5a9a2b7f579b870e2bfcda43c2288e92577d0780c7d045a9"
+}
