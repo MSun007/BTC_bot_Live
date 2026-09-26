@@ -1,0 +1,15 @@
+.audit-deps/
+audit/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+state/
+*.sqlite3*
+*.lock
+*.tgz
+*.tar.gz
+.env*
+!.env.example
+*credentials*.json
+*.pem

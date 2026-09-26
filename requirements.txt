@@ -1,6 +1,6 @@
-# Dashboard (perp_dashboard_app.py) runtime dependencies.
-# Ranges pin major versions for reproducible Cloud Run builds while allowing
-# patch/minor security updates.
+# Shared paper engine/dashboard runtime dependencies.
+# These ranges allow updates and are NOT a reproducible lockfile.
+# Record exact resolved versions for every deployment.
 Flask>=3.0,<4
 gunicorn>=21.2
 pandas>=2.1,<3
@@ -12,3 +12,4 @@ google-cloud-secret-manager>=2.18
 coinbase-advanced-py>=1.2
 ta>=0.11
 gcsfs>=2024.2
+google-cloud-storage>=2.18,<4

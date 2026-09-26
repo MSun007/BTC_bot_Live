@@ -16,6 +16,27 @@ def candle(start, o, h, lo, c, volume=100):
 
 
 class AdaptiveRiskTests(unittest.TestCase):
+    def test_score3_initial_entries_are_not_progressive_adds(self):
+        state = larry.default_engine_state()
+        state["position_legs"] = {"reconciled": True, "legs": []}
+        for target in (2, -2):
+            with self.subTest(target=target):
+                allowed, reason = larry.should_allow_progressive_add(
+                    state, 0, target, {"score": 3, "confidence_pct": 58})
+                self.assertTrue(allowed, reason)
+                allowed, reason = larry.should_allow_progressive_add(
+                    state, target, target * 2, {"score": 3, "confidence_pct": 58})
+                self.assertFalse(allowed)
+                self.assertIn("add_conviction_not_maintained", reason)
+
+    def test_initial_entry_still_requires_reconciled_position_book(self):
+        state = larry.default_engine_state()
+        state["position_legs"] = {"reconciled": False, "legs": []}
+        allowed, reason = larry.should_allow_progressive_add(
+            state, 0, 2, {"score": 3, "confidence_pct": 58})
+        self.assertFalse(allowed)
+        self.assertIn("reconciliation_drift", reason)
+
     def test_config_integrity_requires_exact_version_and_hash(self):
         good = larry.strategy_config_integrity({
             "CONFIG_VERSION": larry.EXPECTED_CONFIG_VERSION,

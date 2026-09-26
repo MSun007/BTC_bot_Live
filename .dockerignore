@@ -9,3 +9,14 @@ README.md
 __pycache__/
 *.pyc
 *.md
+.audit-deps/
+audit/
+state/
+*.sqlite3*
+.env*
+*.pem
+*.tgz
+*.tar.gz
+venv/
+.venv/
+test_*.py

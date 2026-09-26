@@ -1,4 +1,5 @@
-v48.0-final
-engine=larry_perp_v48_score3_probe
-source_commit=5d46f85f224de58ed42b6bcf259a38b21c31cf12
-archived=2026-08-30
+paper-audit-2026-09-26
+engine=larry_perp_v48_score3_probe_with_paper_adapter
+default_profile=2k
+active_deployment_profile=10k_x5
+status=see_docs/DEPLOYMENT_2026-09-26.md_for_runtime_evidence
